@@ -1,0 +1,1683 @@
+---
+title: "Data analysis for Optimization of SNV calling, synthetic influenza RNA part"
+author: "Bessie Wang"
+date: "6/14/2022"
+output: html_document
+---
+
+# This notebook generates the following figures for the manuscript:
+- Figure 3A (influenza)
+- Figure 3B
+- Figure 4C
+- Figure 4D
+- Supp. Fig5A
+- Supp. Fig5C
+- Supp. Fig5D
+- Supp. Fig5E
+- Supp. Fig6B
+- Supp. Fig6C
+- Supp. Fig7A
+- Supp. Fig7B
+- Supp. Fig7C
+- Supp. Fig8C
+- Supp. Fig8D
+
+# Required inputs to run notebook:
+## R functions:
+- maf_functions.R
+## Input SNV file:
+- SNV_info_allcaller.csv
+- SNV_info_with_transcriptionerror_binom.csv
+## Metadata outlining samples within the matrix 
+- Edited_metadata.csv
+
+```{r}
+# Load necessary packages
+library('ggplot2')
+library('plyr')
+library('tidyverse')
+library('dplyr')
+library('glue')
+library('vcfR')
+library('tools')
+library('seqinr')
+library('plotly')
+```
+
+# Set working directory 
+```{r setup}
+workdirectory= "/Users/bessiewang/Desktop/GreshamLab/syntheticcontrols/" # set this as its own variable so it is super easy to change later
+knitr::opts_knit$set(root.dir = workdirectory)  # this should set the rmd root directory so you don't have to type out 'workdirectory' later on (you still can if you want it doesn't matter)
+getwd()  # this should tell you what directory you are working in
+```
+
+#load vivaldi scripts (process all the vcf files and output a single dataframe)
+```{r}
+source(glue('{workdirectory}scripts/maf_functions/read_reference_fasta_dna.R')) 
+source(glue('{workdirectory}scripts/maf_functions/arrange_gt_data.R'))
+source(glue('{workdirectory}scripts/maf_functions/arrange_no_gt_data.R'))
+source(glue('{workdirectory}scripts/maf_functions/arrange_gt_varscan.R'))
+source(glue('{workdirectory}scripts/maf_functions/add_metadata.R'))
+source(glue('{workdirectory}scripts/maf_functions/filter_variants.R'))
+source(glue('{workdirectory}scripts/maf_functions/prepare_annotations.R'))
+source(glue('{workdirectory}scripts/maf_functions/snpeff_info.R'))
+source(glue('{workdirectory}scripts/maf_functions/shannon_entropy.R'))
+source(glue('{workdirectory}scripts/maf_functions/plot_shannon.R'))
+source(glue('{workdirectory}scripts/maf_functions/tally_it.R'))
+source(glue('{workdirectory}scripts/maf_functions/tstv_ratio.R'))
+source(glue('{workdirectory}scripts/maf_functions/tstv_plot.R'))
+source(glue('{workdirectory}scripts/maf_functions/snv_location.R'))
+```
+
+# Run arrange_gt_data on ivar, timo, haplotypecaller, mutect2, freebayes data under standard setting
+```{r}
+vcf_df = arrange_gt_data( glue('{workdirectory}/analysis_final/'), glue('{workdirectory}/analysis_final/Reference_coding.fa'), annotated = 'no', ntlist=c('A','G','T','C'))
+```
+# Run loferq data under standard setting
+```{r}
+vcf_df_lofreq = arrange_no_gt_data( glue('{workdirectory}/lofreq/'), glue('{workdirectory}/lofreq/Reference_coding.fa'), annotated = 'no', ntlist=c('A','G','T','C'))
+
+#Modify lofreq df for later rbind 
+vcf_df_lofreq = vcf_df_lofreq  %>% add_column(REF_COUNT = NA) %>% add_column(ALT_COUNT = NA) %>% add_column(ChromKey = NA)
+vcf_df_lofreq$AF = NULL
+```
+# Run varscan data under standard setting
+```{r}
+vcf_df_var = arrange_gt_data_varscan( glue('{workdirectory}/varscan/'), glue('{workdirectory}/varscan/Reference_coding.fa'), annotated = 'no', ntlist=c('A','G','T','C'))
+
+vcf_df_var = vcf_df_var %>% add_column(ChromKey = NA)
+```
+
+#Merge df for all the callers
+```{r}
+vcf_df = rbind(vcf_df, vcf_df_lofreq, vcf_df_var)
+```
+
+
+# Modify vcf_df for the later merging of vcf_df and the metadata
+```{r} 
+vcf_df$sample_name = vcf_df$sample
+#print(head(vcf_df))
+vcf_df = vcf_df %>% separate(sample_name, c("filename", "vcf_inputs"), sep='[.]')
+```
+
+# read in metadata 
+```{r}
+metadata = read.csv("Edited_metadata.csv", header = T)
+#print(head(metadata))
+```
+
+# Merge the metadata with vcf_df
+```{r}
+vcf_full = merge(vcf_df, metadata, by=c('filename'), all.x = T) 
+#print(head(vcf_full))
+```
+
+#checking to make sure that the dimensions after merging are identical 
+```{r}
+dim(vcf_df)
+dim(vcf_full)
+#Dimensions are off by 10, checking the names of the files that are in the metadata but NOT included in our variant data
+not_included = setdiff(levels(factor(vcf_full$filename)), levels(factor(vcf_df$filename)))
+print(not_included)
+#Check manually the metadata to confirm that we do not have variants in the above samples because they are WT and/or water controls 
+
+#Print off the names so they should all be wt control or empty
+levels(factor((vcf_full %>% filter(filename %in% not_included))$SampleInfo))
+#Re-merge to remove these files and check with Mohammed that 0 variants were found in these samples and weren't missed during analysis 
+vcf_full = merge(vcf_df, metadata, by=c('filename'), all.x = TRUE)  # this will keep ALL variant data
+
+#rechecking the dim - they should be identical now 
+dim(vcf_df)
+dim(vcf_full)
+```
+
+#Modify vcf to remove files that are not used
+```{r}
+message ("I'm removing samples that we are uncertain because of the metadata")
+vcf_full = vcf_full %>% filter(Use == "yes") %>% unique() 
+```
+
+# Merge vcf_full with SNV_info to select TP, FP, TN
+```{r}
+SNVinfo = read.csv("SNV_info_allcaller.csv", header = T, check.names = FALSE)
+
+#Right now the NA segment is treated as NA values in the df, so need to fix that
+SNVinfo$CHROM = as.character(SNVinfo$CHROM)
+SNVinfo$CHROM[is.na(SNVinfo$CHROM)] <- "NA"
+
+#Right now the SNV_info is in wide format, change that into long format using pivot_longer
+# we need the columns Copy_number and Expected_freq to be able to merge with your variant data, after merging na will appear in 'True' variables if it is a false-positive call! 
+SNVinfo = SNVinfo %>% pivot_longer(c("10000000", "1000000","100000","10000","1000"), names_to = "TrueExpectedCopyNumber", values_to = "Copy_number")
+
+SNVinfo = SNVinfo %>% pivot_longer(c("0.5", "0.25", "0.125",	'0.0625',	'0.0313',	'0.0156',	'0.0078',	'0.0039'), names_to = "TrueExpectedFrequency", values_to = "Expected_freq")
+
+# Change the name of variant caller info
+vcf_full$vcf_inputs <- replace(vcf_full$vcf_inputs, vcf_full$vcf_inputs=="fas_BWA_ivar_standard", "ivar")
+vcf_full$vcf_inputs <- replace(vcf_full$vcf_inputs, vcf_full$vcf_inputs=="fas_BWA_timo_standard", "timo")
+vcf_full$vcf_inputs <- replace(vcf_full$vcf_inputs, vcf_full$vcf_inputs=="fas_BWA_hc_standard", "hc")
+vcf_full$vcf_inputs <- replace(vcf_full$vcf_inputs, vcf_full$vcf_inputs=="fas_BWA_mutect2_standard_unfiltered", "mutect2")
+vcf_full$vcf_inputs <- replace(vcf_full$vcf_inputs, vcf_full$vcf_inputs=="fas_BWA_freebayes_standard", "freebayes")
+vcf_full$vcf_inputs <- replace(vcf_full$vcf_inputs, vcf_full$vcf_inputs=="fas_BWA_lofreq_standard", "lofreq")
+vcf_full$vcf_inputs <- replace(vcf_full$vcf_inputs, vcf_full$vcf_inputs=="fas_BWA_varscan_standard", "varscan")
+
+
+#Merge SNVinfo with vcf_full
+vcf_plus = merge(vcf_full, SNVinfo, by=c("POS","CHROM", "REF", "ALT", "Copy_number", "Expected_freq", "vcf_inputs"), all = TRUE)
+
+#Replace NAs with 0
+# use = 0 instead of = "0" so the following if_else can work (numeric values to use >, =, <)
+vcf_plus$Expected_freq[is.na(vcf_plus$Expected_freq)] = 0
+vcf_plus$ALT_FREQ[is.na(vcf_plus$ALT_FREQ)] = 0
+
+vcf_plus$TrueExpectedCopyNumber[is.na(vcf_plus$TrueExpectedCopyNumber)] = 0
+vcf_plus$TrueExpectedFrequency[is.na(vcf_plus$TrueExpectedFrequency)] = 0
+
+#Using if.else to determine TP, FP, FN
+vcf_plus = vcf_plus %>% mutate(type = ifelse( ALT_FREQ > 0 & TrueExpectedFrequency == 0, "FP",
+                                   ifelse(ALT_FREQ == 0 & TrueExpectedFrequency > 0, "FN",
+                                   ifelse(ALT_FREQ > 0 & TrueExpectedFrequency > 0, "TP", "NA"))))
+```
+
+```{r}
+message("Remove 10^7 samples due to technical issues")
+vcf_plus = vcf_plus %>% filter(Copy_number != "10^7")
+```
+
+## What is the relationship between observed and expected allele frequency estimates? Fig 3C & Fig S6A
+```{r}
+# Use only TPs - so we can answer the question: of the TP snps that we did find, how close were they to the expected freq?
+TP = vcf_plus %>% filter (type == "TP", Rep == "rep1")
+
+# Set colors for callers
+tool_colors = c('#CC2F42', # freebayes - red
+                 '#35B6E9', # hc - bright blue
+                 '#009E73', # ivar - green
+                 '#F9BECD', # lofreq - pink
+                 '#F0E442', # mutect2 - yellow
+                 '#CCD2EB', # timo - light purple
+                 '#9B9E9A') # varscan, grey
+tools = c("freebayes", "hc", "ivar", "lofreq", "mutect2", "timo", "varscan")
+names(tool_colors) = tools
+tool_colScale_fill <- scale_fill_manual(name = "Variant Caller",values = tool_colors)
+tool_colScale <- scale_colour_manual(name = "Variant Caller",values = tool_colors)
+
+TPmedian = TP %>% group_by(TrueExpectedFrequency, CHROM) %>% summarise(medianfreq = median(ALT_FREQ))
+
+TP = merge(TP, TPmedian, by = c("TrueExpectedFrequency", "CHROM"))
+
+
+# X-axis: True expected freq (FP should have an expected freq of 0)
+# Order the grid so it would be PB2, HA, NA
+TP$CHROM = factor(TP$CHROM, levels=c('PB2', 'HA', 'NA'))
+
+Fig3A = ggplot(TP %>% filter(!FerretID %in% c("Mix37", "Mix38", "Mix39", "Mix40", "Mix41", "Mix42", "Mix44")), aes(x = factor(round(medianfreq, digits = 3)), y = ALT_FREQ, color = vcf_inputs))+
+  labs(x="Median observed Frequency", y= "Observed Frequency") +
+  geom_point(width = 0.2, alpha = 0.3, position=position_dodge(width = 0.5)) + 
+  tool_colScale+
+  facet_grid(.~CHROM, scales = "free", space = "free")  + 
+  theme_bw() +
+  theme(axis.title = element_text(size = 15))+
+  theme(legend.text = element_text(size = 13))+ 
+  theme(legend.key = element_blank(),
+                strip.background = element_rect(colour="black", fill="white"),
+                axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+  stat_summary(fun = "median", geom = "point", col = "black",size = 2,shape = 18,fill = "red")
+print(Fig3A)
+ggsave(Fig3A,
+       filename = glue("{workdirectory}/figures_new/Fig3A.png"),
+       width = 15,
+       height = 5, limitsize=FALSE)#, useDingbats = FALSE)
+ggsave(Fig3A,
+       filename = glue("{workdirectory}/figures_pdf_new/Fig3A.pdf"),
+       width = 15,
+       height = 5, limitsize=FALSE)#, useDingbats = FALSE)
+
+# Set colors for copy numbers
+cn_colors <- c( '#BBBBBB', '#999999', 
+                '#777777', 
+                '#555555', 
+                '#333333')
+
+copy_numbers = c("10^2", "10^3", "10^4", "10^5", "10^6")
+names(cn_colors) = copy_numbers
+cn_colScale_fill <- scale_fill_manual(name = "Copy Number",values = cn_colors)
+cn_colScale <- scale_colour_manual(name = "Copy Number",values = cn_colors)
+
+FigS6A = ggplot(TP, aes(x = as.numeric(Expected_freq), y = ALT_FREQ, color = Copy_number))+
+  labs(x="Expected Frequency", y= "Observed Frequency") +
+  geom_point(alpha = 0.8) + 
+  facet_grid(CHROM~vcf_inputs)  + 
+  theme_bw() +
+  cn_colScale+
+  geom_abline(slope=1)+
+  theme(axis.title = element_text(size = 15))+
+  theme(legend.text = element_text(size = 13))+ 
+  theme(legend.key = element_blank(),
+                strip.background = element_rect(colour="black", fill="white"),
+                axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+print(FigS6A)
+ggsave(FigS6A,
+       filename = glue("{workdirectory}/figures_new/FigS6A.png"),
+       width = 16,
+       height = 6.5, limitsize=FALSE)#, useDingbats = FALSE)
+ggsave(FigS6A,
+       filename = glue("{workdirectory}/figures_pdf_new/FigS6A.pdf"),
+       width = 16,
+       height = 6.5, limitsize=FALSE)#, useDingbats = FALSE)
+```
+
+## Coverage plots - Fig S5C & S5D
+```{r}
+# make a coverage plot for all samples across genome position
+flu_covinfo = read.csv("cov_data.tsv", sep = "", header = T)
+flu_covinfo = flu_covinfo %>% filter (name != "000000000-K4LKV_l01_undetermined.fas_BWA") 
+flu_covinfo$segment[is.na(flu_covinfo$segment)] <- "NA"
+
+flu_cov = separate(flu_covinfo,name,sep = "_", 
+                   into = c("IDK", "IDKk", "IDkkk", "Sample", "Rep")) %>% 
+  select(!c("IDK","IDKk","IDkkk"))
+flu_cov$Rep<-gsub(".fas","",as.character(flu_cov$Rep))
+flu_cov = flu_cov %>% filter(Sample != "Control01") %>% filter(Sample != "Control02")%>% filter(Sample != "Control04")%>% filter(Sample != "Control05")
+
+# Set gradient colors for all samples
+sample_colors = c("#373737", "#323232", "#2D2D2D","#282828", "#232323","#1E1E1E", "#191919", "#141414", "#0F0F0F", "#0A0A0A","#3C3C3C","#414141", "#464646", "#4B4B4B", "#505050", "#555555", "#5A5A5A", "#5F5F5F", "#646464", "#696969","#6E6E6E","#737373", "#787878", "#7D7D7D",  "#828282", "#878787","#8C8C8C", "#919191", "#969696", "#9B9B9B",  "#ADADAD","#A5A5A5", "#AAAAAA", "#AFAFAF", "#B4B4B4", "#B9B9B9", "#BEBEBE", "#C3C3C3","#C8C8C8",  "#CDCDCD", "#D2D2D2", "#D7D7D7", "#DCDCDC", "#E1E1E1")
+samples = c("Mix01", "Mix02", "Mix03", "Mix04", "Mix05", "Mix06", "Mix07", "Mix08", "Mix09", "Mix10", "Mix11","Mix12", "Mix13", "Mix14", "Mix15", "Mix16", "Mix17", "Mix18", "Mix19", "Mix20", "Mix21", "Mix22", "Mix23", "Mix24", "Mix25", "Mix26", "Mix27", "Mix28", "Mix29", "Mix30", "Mix31", "Mix32", "Mix33", "Mix34", "Mix35", "Mix36", "Mix37", "Mix38", "Mix39", "Mix40", "Mix41", "Mix42", "Mix43", "Mix44")
+names(sample_colors) = samples
+sample_colScale_fill <- scale_fill_manual(name = "Samples",values = sample_colors)
+sample_colScale <- scale_colour_manual(name = "Samples",values = sample_colors)
+
+flu_cov$segment = factor(flu_cov$segment, levels=c("PB2", "HA", "NA"))
+FigS5C = ggplot(data = flu_cov, aes(x=ntpos, y=log10(totalcount), color = Sample)) +
+        geom_line(aes(group=Sample), size = 1) +
+        theme_bw() +
+  sample_colScale+
+  theme(axis.title = element_text(size = 15))+
+  theme(legend.text = element_text(size = 15))+ 
+        theme(legend.key = element_blank(),
+              strip.background = element_rect(colour="black", fill="white"),
+              axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+        facet_grid(Rep~segment, scales = "free_x") +
+        xlab("Nucleotide Position") +
+        ylab("Log10 Read Depth")
+print(FigS5C)
+ggsave(FigS5C,
+       filename = glue("{workdirectory}/FigS5C.png"),
+       width = 12,
+       height = 7, limitsize=FALSE)#, useDingbats = FALSE)
+ggsave(FigS5C,
+       filename = glue("{workdirectory}/figures_pdf/FigS5C.pdf"),
+       width = 12,
+       height = 7, limitsize=FALSE)#, useDingbats = FALSE)
+
+## what are the bad samples? need to exclude them from the analysis 
+bad_samples = flu_cov %>% filter (log10(totalcount) < 2)
+unique(bad_samples$Sample)
+
+flu_cov = flu_cov %>% filter(!Sample %in% c("Mix37", "Mix38", "Mix39", "Mix40", "Mix41", "Mix42", "Mix44"))
+
+##calculate the average coverage for each sample. then plot: X-axis: sample, y-axis:avg coverage, geom_point
+
+cov_avg = flu_cov %>% group_by(Sample, segment, Rep) %>% summarise(sample_avg_cov = mean(totalcount))
+
+# Set color for replicates
+rep12_colors = c('#2F142B', # rep1
+                '#43668B')# rep2
+rep12names = c("rep1", "rep2")
+names(rep12_colors) = rep12names
+rep12_colScale_fill <- scale_fill_manual(name = "Rep",values = rep12_colors)
+rep12_colScale <- scale_colour_manual(name = "Rep",values = rep12_colors)
+
+FigS5D = ggplot(cov_avg, aes(x = Sample, y = log10(sample_avg_cov), color = Rep))+
+  labs(x="Sample", y= "Log10(Average Coverage)") +
+  geom_point(alpha = 0.8) + 
+  facet_grid(.~segment,scales = "free")  + 
+  rep12_colScale+
+  theme_bw() +
+  theme(axis.title = element_text(size = 15))+
+  theme(legend.text = element_text(size = 15))+ 
+  theme(legend.key = element_blank(),
+                strip.background = element_rect(colour="black", fill="white"),
+                axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+print(FigS5D)
+ggsave(FigS5D,
+       filename = glue("{workdirectory}/FigS5D.png"),
+       width = 12,
+       height = 5, limitsize=FALSE)#, useDingbats = FALSE)
+ggsave(FigS5D,
+       filename = glue("{workdirectory}/figures_pdf/FigS5D.pdf"),
+       width = 12,
+       height = 5, limitsize=FALSE)#, useDingbats = FALSE)
+```
+
+## Create the replicate df
+```{r}
+# separate rep1 from rep2
+rep1 = vcf_plus %>% filter(Rep == "rep1") %>% filter(!FerretID %in% c("Mix37", "Mix38", "Mix39", "Mix40", "Mix41", "Mix42", "Mix44"))
+rep2 = vcf_plus %>% filter(Rep == "rep2") %>% filter(!FerretID %in% c("Mix37", "Mix38", "Mix39", "Mix40", "Mix41", "Mix42", "Mix44"))
+
+# merge the replicates 
+replicates = merge(rep1, rep2, 
+by.x =c('CHROM', "Copy_number", "POS", "Expected_freq", "REF", "ALT", "ChromKey", "vcf_inputs", "Use", "Cohort", "repname"),
+by.y = c('CHROM', "Copy_number", "POS", "Expected_freq", "REF", "ALT", "ChromKey", "vcf_inputs", "Use", "Cohort", "Sample"),  all = T)
+
+#Change NA to zero 
+replicates$ALT_FREQ.x[is.na(replicates$ALT_FREQ.x)] = 0
+replicates$ALT_FREQ.y[is.na(replicates$ALT_FREQ.y)] = 0
+replicates$type.x[is.na(replicates$type.x)] = "NONE"
+replicates$type.y[is.na(replicates$type.y)] = "NONE"
+# Remove the controls for this analysis 
+replicates = replicates %>% filter(!Copy_number == "control")
+
+# specify the four categories 
+
+replicates = replicates %>% mutate(Category = ifelse(type.x == 'TP' & type.x == type.y, "both_tp", 
+                               ifelse(type.x == type.y & type.x == 'FP', "both_fp", 
+                               ifelse(type.x == "TP" & type.y != "TP", "rep1_tp", 
+                               ifelse(type.x != "TP" & type.y == 'TP', 'rep2_tp', 
+                               ifelse(type.x == 'FP' & type.y != 'FP' | type.x != 'FP' & type.y == 'FP', 'single_fp', "NA"))))))
+```
+
+## How we find the transcription errors - Fig S5E
+```{r}
+replicates$VAR = paste0(replicates$CHROM, '_', replicates$POS,'_', replicates$ALT)
+#replicates %>% filter(Category == "both_fp")
+reduced_reps_df = replicates %>% filter(Category == "both_fp") %>%
+    select(CHROM, POS, ALT,ALT_FREQ.y,VAR, ALT_FREQ.x, REF, Category, Expected_freq, Copy_number, vcf_inputs) %>%
+      unique()
+reduced_reps_df = reduced_reps_df %>% group_by(Expected_freq, CHROM, POS, ALT, VAR,vcf_inputs) %>%
+                    add_tally(name = 'copy_number_count') %>%
+                    unique() %>% ungroup() %>% group_by(Copy_number, CHROM, POS, ALT, VAR,vcf_inputs) %>%
+                  add_tally(name = 'Expected_freq_count') %>% ungroup() %>%
+                  group_by(Copy_number, CHROM, POS, ALT, VAR, Expected_freq) %>%
+                  add_tally(name = 'vcf_type_count') %>% ungroup()
+
+# Filter for transcription errors 
+transcription_err = levels(factor((reduced_reps_df %>% filter(copy_number_count >1 &
+                                                                 Expected_freq_count > 1 &
+                                                                 vcf_type_count >=2 &
+                                                                 vcf_inputs %in% c("varscan","ivar","timo","freebayes"))                                                    %>% unique())$VAR))
+transcription_errors = reduced_reps_df %>% filter(VAR %in% transcription_err)
+transcription_errors$error_type = "pre_MRTPCR"
+other_errors = reduced_reps_df %>% filter(!VAR %in% levels(factor(transcription_errors$VAR)))
+other_errors$error_type = "post_MRTPCR"
+
+error_df= rbind(transcription_errors, other_errors)
+
+error_df$CHROM = factor(error_df$CHROM, levels = c("PB2", "HA", "NA"))
+error_df$vcf_inputs = factor(error_df$vcf_inputs, levels = c("lofreq","hc","mutect2","freebayes","timo", "ivar","varscan"))
+
+# Set color for nucleotides
+nt_colors = c('#d7191c', # red - A
+'#abd9e9', # light blue - T
+'#fdae61', # orange - C 
+'#2c7bb6') # dark blue - G
+nt = c("A", "T", "C", "G")
+names(nt_colors) = nt
+nt_colScale_fill <- scale_fill_manual(name = "Nucleotide",values = nt_colors)
+nt_colScale <- scale_colour_manual(name = "Nucleotide",values = nt_colors)
+
+FigS5E = ggplot(error_df, aes(x=VAR, y=vcf_inputs,fill = ALT)) +
+    geom_tile(alpha = 0.8) +
+    facet_grid(error_type~CHROM, scales = 'free')+
+    nt_colScale_fill+
+    theme(axis.text.x=element_blank(), #remove x axis labels
+          axis.ticks.x=element_blank(),
+          legend.key = element_blank(),
+                  strip.background = element_rect(colour= "black", fill= "white"))
+print(FigS5E)
+
+ggsave(FigS5E,
+       filename = glue("{workdirectory}/figures_new/FigS5E.png"),
+       width = 10,
+       height = 5, limitsize=FALSE)#, useDingbats = FALSE)
+ggsave(FigS5E,
+       filename = glue("{workdirectory}/figures_pdf_new/FigS5E.pdf"),
+       width = 10,
+       height = 5, limitsize=FALSE)#, useDingbats = FALSE)
+```
+
+## what's the relationship between allele freq estimates between replicates? - Figure S7A
+```{r}
+
+## Change the category of transcription errors we found into "transcription error"
+Transcription_error = replicates %>% filter(CHROM %in% c("PB2", "HA", "NA"), POS %in% c("596", "114", "176", "2102", "2197", "2207", "1367"), ALT %in% c("A" , "G")) %>% filter(Category == "both_fp") %>%  mutate(Category = replace(Category, Category == "both_fp", "pre_MRTPCR"))
+
+replicates = replicates %>% filter (!(CHROM == "HA"& POS == "596"& ALT == "A" & Category == "both_fp")) %>% filter (!(CHROM == "PB2"& POS == "114"& ALT == "A"& Category == "both_fp")) %>% filter (!(CHROM == "PB2"& POS == "176"& ALT == "A"& Category == "both_fp")) %>% filter (!(CHROM == "PB2"& POS == "2102"& ALT == "G"& Category == "both_fp")) %>% filter (!(CHROM == "PB2"& POS == "2197"& ALT == "G"& Category == "both_fp")) %>% filter (!(CHROM == "PB2"& POS == "2207"& ALT == "G"& Category == "both_fp")) %>% filter (!(CHROM == "NA"& POS == "1367"& ALT == "A"& Category == "both_fp")) 
+
+replicates = rbind(replicates, Transcription_error)
+                                                 
+#Set colors for categories
+category_colors = c('#2F142B', # both TP
+		    '#E86F3F', # both FP
+		    '#5E2A59', # one rep TP
+		    '#5E2A59', # one rep TP
+		    '#F2A07B',# one rep FP 
+		    "#F0E442")#preMRTPCR 
+categories = c('both_tp','both_fp','rep1_tp','rep2_tp','single_fp', 'pre_MRTPCR' )
+names(category_colors) = categories
+category_colScale_fill <- scale_fill_manual(name = "Category",values = category_colors)
+category_colScale <- scale_colour_manual(name = "Category",values = category_colors)
+
+#Plot: observed freq in rep1 against observed freq in rep2
+#Create layers so that the both_fp category are on the toppest layer of the graph for better visualization (otherwise it will be blocked by both_tp becuse there are a lot of them)
+FPlayer = replicates %>%  filter(Category == "both_fp")
+Othertype = replicates %>%  filter(!Category == "both_fp")
+
+## Annotate the percentage of TP & FPs shared between two replicates for each caller 
+ivar_both_fp = replicates %>%  filter(Category == "both_fp", vcf_inputs =="ivar")
+ivar_both_tp = replicates %>%  filter(Category == "both_tp", vcf_inputs =="ivar")
+
+hc_both_fp = replicates %>%  filter(Category == "both_fp", vcf_inputs =="hc")
+hc_both_tp = replicates %>%  filter(Category == "both_tp", vcf_inputs =="hc")
+
+timo_both_fp = replicates %>%  filter(Category == "both_fp", vcf_inputs =="timo")
+timo_both_tp = replicates %>%  filter(Category == "both_tp", vcf_inputs =="timo")
+
+mutect2_both_fp = replicates %>%  filter(Category == "both_fp", vcf_inputs =="mutect2")
+mutect2_both_tp = replicates %>%  filter(Category == "both_tp", vcf_inputs =="mutect2")
+
+lofreq_both_fp = replicates %>%  filter(Category == "both_fp", vcf_inputs =="lofreq")
+lofreq_both_tp = replicates %>%  filter(Category == "both_tp", vcf_inputs =="lofreq")
+
+varscan_both_fp = replicates %>%  filter(Category == "both_fp", vcf_inputs =="varscan")
+varscan_both_tp = replicates %>%  filter(Category == "both_tp", vcf_inputs =="varscan")
+
+freebayes_both_fp = replicates %>%  filter(Category == "both_fp", vcf_inputs =="freebayes")
+freebayes_both_tp = replicates %>%  filter(Category == "both_tp", vcf_inputs =="freebayes")
+
+## Create an additional data frame to hold the text annotations 
+Annotation_fp = data.frame(
+  label = c( "0.18%","1.7%","0%","2.7%","10.4%","19.6%","22.3%"), 
+  vcf_inputs_f = c( "varscan", "ivar","timo","freebayes", "mutect2", "hc", "lofreq"))
+
+
+FPlayer$vcf_inputs_f = factor(FPlayer$vcf_inputs, levels=c("varscan", "ivar","timo","freebayes", "mutect2", "hc", "lofreq"))
+Othertype$vcf_inputs_f = factor(Othertype$vcf_inputs, levels=c("varscan", "ivar","timo","freebayes", "mutect2", "hc", "lofreq"))
+
+# Zoom in the figure, looking at observed frequency less or equal to 0.25
+Othertype_v2 = Othertype %>% filter(ALT_FREQ.x <= 0.25, ALT_FREQ.y <=0.25)
+FPlayer_v2 = FPlayer %>% filter(ALT_FREQ.x <= 0.25, ALT_FREQ.y <=0.25)
+
+FigS7A = ggplot() +  
+    geom_point(data= Othertype_v2, aes(x = ALT_FREQ.x, y = ALT_FREQ.y, color = Category), width = 0.2, alpha = 0.4) +
+    geom_point(data=FPlayer_v2, aes(x = ALT_FREQ.x, y = ALT_FREQ.y, color = Category), width = 0.2, alpha = 0.4) +
+    labs(x="Observed Frequency Rep1", y= "Observed Frequency Rep2") +
+    category_colScale +
+    theme_bw() +
+    facet_grid(.~vcf_inputs_f) +
+    theme(legend.key = element_blank(),
+                strip.background = element_rect(colour="black", fill="white"),
+                axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+    annotate(geom = "segment", x = 0.1, y = 0.025, xend = 0.025, yend = 0.015, curvature = .3, arrow = arrow(length = unit(1, "mm"))) +
+  geom_text(x = 0.13, y = 0.028, aes(label = label), data = Annotation_fp, size = 3)
+print(FigS7A)
+
+ggsave(FigS7A,
+       filename = glue("{workdirectory}/figures_new/FigS7A.png"),
+       width = 15,
+       height = 3, limitsize=FALSE)#, useDingbats = FALSE)
+ggsave(FigS7A,
+       filename = glue("{workdirectory}/figures_pdf_new/FigS7A.pdf"),
+       width = 15,
+       height = 3, limitsize=FALSE)#, useDingbats = FALSE)
+```
+
+## SNV map: showing both engineered SNVs and in-vitro transcription errors - FigureS5A
+```{r}
+SNVTransErr = read.csv("Transcription_error_binom.csv", header = T, check.names = FALSE)
+SNVTransErr$CHROM = as.character(SNVTransErr$CHROM)
+SNVTransErr$CHROM[is.na(SNVTransErr$CHROM)] <- "NA"
+SNVinfo$CHROM[is.na(SNVinfo$CHROM)] <- "NA"
+
+SNVinfo$CHROM = factor(SNVinfo$CHROM, levels=c('PB2', 'HA', 'NA'))
+SNVTransErr$CHROM = factor(SNVTransErr$CHROM, levels=c('PB2', 'HA', 'NA'))
+
+FigS5A =  ggplot() + 
+            geom_segment(data = SNVinfo, aes(x = POS, xend = POS, y=0, yend = 1),alpha = 0.8, color = "azure4") + 
+            geom_segment(data = SNVTransErr, aes(x = POS, xend = POS, y=0, yend = 1, linetype= "Pre-MRTPCR error"),alpha = 0.8, color = "red") + 
+            facet_grid(.~CHROM, scales = "free_x", space = 'free_x') +
+            ylab("") + 
+            xlab("Genome position") + 
+            scale_x_continuous(expand = c(0, 0))+
+            theme(panel.background = element_blank(),
+                      axis.line = element_line(colour = "gray"),
+                      legend.key = element_blank(),
+                      strip.background = element_rect(colour="gray", fill="white"),
+                      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+                        panel.border = element_rect(colour='gray', fill = NA),
+                         axis.ticks.y = element_blank(),        
+            axis.text.y = element_blank(), legend.position="bottom",
+                  legend.title=element_blank())
+print(FigS5A)
+ggsave(FigS5A,
+       filename = glue("{workdirectory}/Figures/FigS5A.png"),
+       width = 17,
+       height = 2, limitsize=FALSE)#, useDingbats = FALSE)
+ggsave(FigS5A,
+       filename = glue("{workdirectory}/figures_pdf/FigS5A.pdf"),
+       width = 17,
+       height = 2, limitsize=FALSE)#, useDingbats = FALSE)
+
+# SNV map without transcription error 
+SNVmap_noTE =  ggplot() + 
+            geom_segment(data = SNVinfo, aes(x = POS, xend = POS, y=0, yend = 1),alpha = 1, color = "azure4", size = 1) + 
+            #geom_segment(data = SNVTransErr, aes(x = POS, xend = POS, y=0, yend = 1, linetype= "Pre-MRTPCR error"),alpha = 0.8, color = "red") + 
+            facet_grid(.~CHROM, scales = "free_x", space = 'free_x') +
+            ylab("") + 
+            xlab("Genome position") + 
+            scale_x_continuous(expand = c(0, 0))+
+            theme(panel.background = element_blank(),
+                      axis.line = element_line(colour = "gray"),
+                      legend.key = element_blank(),
+                      strip.background = element_rect(colour="gray", fill="white"),
+                      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+                        panel.border = element_rect(colour='gray', fill = NA),
+                         axis.ticks.y = element_blank(),        
+            axis.text.y = element_blank(), legend.position="bottom",
+                  legend.title=element_blank())
+print(SNVmap_noTE)
+ggsave(SNVmap_noTE,
+       filename = glue("{workdirectory}/Figures/SNVmap_noTE.png"),
+       width = 17,
+       height = 2, limitsize=FALSE)#, useDingbats = FALSE)
+```
+
+## So right now, create a new SNV_info that include the transcription error positions, the rest of the analysis should be based on this SNV_info
+```{r}
+SNVinfo = read.csv("SNV_info_with_transcriptionerror_binom.csv", header = T, check.names = FALSE)
+
+#Right now the NA segment is treated as NA values in the df, so need to fix that
+SNVinfo$CHROM = as.character(SNVinfo$CHROM)
+SNVinfo$CHROM[is.na(SNVinfo$CHROM)] <- "NA"
+
+#Right now the SNV_info is in wide format, change that into long format using pivot_longer
+# we need the columns Copy_number and Expected_freq to be able to merge with your variant data, after merging na will appear in 'True' variables if it is a false-positive call! 
+SNVinfo = SNVinfo %>% pivot_longer(c("10000000", "1000000","100000","10000","1000"), names_to = "TrueExpectedCopyNumber", values_to = "Copy_number")
+
+SNVinfo = SNVinfo %>% pivot_longer(c("0.5", "0.25", "0.125",	'0.0625',	'0.0313',	'0.0156',	'0.0078',	'0.0039'), names_to = "TrueExpectedFrequency", values_to = "Expected_freq")
+
+# Change the name of variant caller info
+vcf_full$vcf_inputs <- replace(vcf_full$vcf_inputs, vcf_full$vcf_inputs=="fas_BWA_ivar_standard", "ivar")
+vcf_full$vcf_inputs <- replace(vcf_full$vcf_inputs, vcf_full$vcf_inputs=="fas_BWA_timo_standard", "timo")
+vcf_full$vcf_inputs <- replace(vcf_full$vcf_inputs, vcf_full$vcf_inputs=="fas_BWA_hc_standard", "hc")
+vcf_full$vcf_inputs <- replace(vcf_full$vcf_inputs, vcf_full$vcf_inputs=="fas_BWA_mutect2_standard_unfiltered", "mutect2")
+vcf_full$vcf_inputs <- replace(vcf_full$vcf_inputs, vcf_full$vcf_inputs=="fas_BWA_freebayes_standard", "freebayes")
+vcf_full$vcf_inputs <- replace(vcf_full$vcf_inputs, vcf_full$vcf_inputs=="fas_BWA_lofreq_standard", "lofreq")
+vcf_full$vcf_inputs <- replace(vcf_full$vcf_inputs, vcf_full$vcf_inputs=="fas_BWA_varscan_standard", "varscan")
+
+#Merge SNVinfo with vcf_full
+vcf_plus = merge(vcf_full, SNVinfo, by=c("POS","CHROM", "REF", "ALT", "Copy_number", "Expected_freq", "vcf_inputs", "Rep"), all = TRUE)
+
+#Replace NAs with 0
+# use = 0 instead of = "0" so the following if_else can work (numeric values to use >, =, <)
+vcf_plus$Expected_freq[is.na(vcf_plus$Expected_freq)] = 0
+vcf_plus$ALT_FREQ[is.na(vcf_plus$ALT_FREQ)] = 0
+
+vcf_plus$TrueExpectedCopyNumber[is.na(vcf_plus$TrueExpectedCopyNumber)] = 0
+
+vcf_plus$TrueExpectedFrequency[is.na(vcf_plus$TrueExpectedFrequency)] = 0
+
+#test831 = vcf_plus %>% filter(POS == "831" & CHROM == "HA")
+
+#Using if.else to determine TP, FP, FN
+vcf_plus = vcf_plus %>% mutate(type = ifelse( ALT_FREQ > 0 & TrueExpectedFrequency == 0, "FP",
+                                   ifelse(ALT_FREQ == 0 & TrueExpectedFrequency > 0, "FN",
+                                   ifelse(ALT_FREQ > 0 & TrueExpectedFrequency > 0, "TP", "NA"))))
+
+vcf_plus = vcf_plus %>% filter(Copy_number != "10^7") 
+```
+
+## How well the variant callers agreed on the frequency of the variants predicted? - FigureS6B Note: Need to combine all these figures to make the whole S6B
+```{r}
+#plot the frequency of a variant in one caller against the frequency in each of the other callers
+Timofreq = vcf_plus %>% filter(vcf_inputs == "timo", Rep == "rep1")
+hcfreq = vcf_plus %>% filter(vcf_inputs == "hc", Rep == "rep1")
+ivarfreq = vcf_plus %>% filter(vcf_inputs == "ivar", Rep == "rep1")
+freebayesfreq = vcf_plus %>% filter(vcf_inputs == "freebayes", Rep == "rep1")
+varscanfreq = vcf_plus %>% filter(vcf_inputs == "varscan", Rep == "rep1")
+
+# Timo vs Haplotypecaller
+timohc = merge(Timofreq, hcfreq, 
+         by.x =c("POS","CHROM", "REF", "ALT", "Expected_freq", "Copy_number", "Rep"),
+         by.y = c("POS","CHROM", "REF", "ALT", "Expected_freq", "Copy_number", "Rep"), all = T)
+
+timohc = timohc%>%filter(!Copy_number == "control")
+timohc$type.x[is.na(timohc$type.x)] <- "NA"
+timohc$type.y[is.na(timohc$type.y)] <- "NA"
+
+timohc = timohc %>% mutate(Category = ifelse(type.x == 'TP' & type.x == type.y, "both_tp", 
+                               ifelse(type.x == type.y & type.x == 'FP', "both_fp", 
+                               ifelse(type.x == type.y & type.x == 'FN', "both_fn",
+                               ifelse(type.x == "TP" & type.y != "TP", "caller1_tp", 
+                               ifelse(type.x != "TP" & type.y == 'TP', 'caller2_tp', 
+                               ifelse(type.x == 'FP' & type.y == 'NA' | type.x == 'NA' & type.y == 'FP', 'single_fp',
+                               ifelse(type.x == 'FN' & type.y != 'FN' | type.x != 'FN' & type.y == 'FN', 'single_fn',
+                                      "NA"))))))))
+
+#Set colors
+category_colors_1 = c( '#E86F3F', '#2F142B','#5E2A59','#5E2A59', '#F2A07B','#43668B', '#43668B')
+categories_1 = c('both_fp','both_tp','caller1_tp','caller2_tp', "single_fp", "single_fn", "both_fn")
+names(category_colors_1) = categories_1
+category_colScale_fill_1 <- scale_fill_manual(name = "Category",values = category_colors_1)
+category_colScale_1 <- scale_colour_manual(name = "Category",values = category_colors_1)
+
+#calculate both TP%
+timohc_bothtp = timohc %>% filter(Category == "both_tp")
+#calculate both FP%
+timohc_counts = timohc %>% group_by(Expected_freq, Copy_number, Category) %>% add_tally(name = 'type_count') %>% ungroup() %>%select(Expected_freq, Category,type_count, vcf_inputs.x, vcf_inputs.y, Copy_number) %>% unique() %>% pivot_wider(names_from = Category, values_from = type_count)
+timohc_counts$both_tp[is.na(timohc_counts$both_tp)] = 0
+#timohc_counts$both_fp[is.na(timohc_counts$both_fp)] = 0
+timohc_counts$both_fn[is.na(timohc_counts$both_fn)] = 0
+sum(timohc_counts$both_fp)/(sum(timohc_counts$both_fp)+sum(timohc_counts$both_tp))
+
+
+Figtimohc = ggplot(timohc, aes(x = ALT_FREQ.x, y = ALT_FREQ.y, color = Category)) + 
+  labs(x="timo", y= "hc") +
+  geom_point(width = 0.2, alpha = 0.5) +
+   category_colScale_1  +
+  theme_bw()+
+  theme(axis.title = element_text(size = 15))+
+  theme(legend.text = element_text(size = 15))+
+  annotate(geom = "text", x = 0.02, y = 0.85, label = "%TP = 61.6%", hjust = "left")+
+  annotate(geom = "text", x = 0.02, y = 0.8, label = "%FP = 0%", hjust = "left")
+  #facet_grid(.~Copy_number)
+print(Figtimohc)
+ggsave(Figtimohc,
+       filename = glue("{workdirectory}/figures_new/Figtimohc.png"),
+       width = 5,
+       height = 4, limitsize=FALSE)#, useDingbats = FALSE)
+ggsave(Figtimohc,
+       filename = glue("{workdirectory}/figures_pdf/Figtimohc.pdf"),
+       width = 5,
+       height = 4, limitsize=FALSE)#, useDingbats = FALSE)
+
+#timo vs ivar
+timoivar = merge(Timofreq, ivarfreq, 
+         by.x =c("POS","CHROM", "REF", "ALT", "Expected_freq", "Copy_number", "Rep"),
+         by.y = c("POS","CHROM", "REF", "ALT", "Expected_freq", "Copy_number", "Rep"), all = T)
+
+timoivar = timoivar%>%filter(!Copy_number == "control")
+timoivar$type.x[is.na(timoivar$type.x)] <- "NA"
+timoivar$type.y[is.na(timoivar$type.y)] <- "NA"
+
+timoivar = timoivar %>% mutate(Category = ifelse(type.x == 'TP' & type.x == type.y, "both_tp", 
+                               ifelse(type.x == type.y & type.x == 'FP', "both_fp", 
+                               ifelse(type.x == type.y & type.x == 'FN', "both_fn",
+                               ifelse(type.x == "TP" & type.y != "TP", "caller1_tp", 
+                               ifelse(type.x != "TP" & type.y == 'TP', 'caller2_tp', 
+                               ifelse(type.x == 'FP' & type.y == 'NA' | type.x == 'NA' & type.y == 'FP', 'single_fp',
+                               ifelse(type.x == 'FN' & type.y != 'FN' | type.x != 'FN' & type.y == 'FN', 'single_fn',
+                                      "NA"))))))))
+
+#calculate both TP%
+timoivar_bothtp = timoivar %>% filter(Category == "both_tp")
+#calculate both FP%
+timoivar_counts = timoivar %>% group_by(Expected_freq, Copy_number, Category) %>% add_tally(name = 'type_count') %>% ungroup() %>%select(Expected_freq, Category,type_count, vcf_inputs.x, vcf_inputs.y, Copy_number) %>% unique() %>% pivot_wider(names_from = Category, values_from = type_count)
+timoivar_counts$both_tp[is.na(timoivar_counts$both_tp)] = 0
+timoivar_counts$both_fp[is.na(timoivar_counts$both_fp)] = 0
+timoivar_counts$both_fn[is.na(timoivar_counts$both_fn)] = 0
+sum(timoivar_counts$both_fp)/(sum(timoivar_counts$both_fp)+sum(timoivar_counts$both_tp))
+
+FPlayer_timoivar = timoivar %>%  filter(Category == "both_fp")
+Othertype_timoivar = timoivar %>%  filter(!Category == "both_fp")
+
+Figtimoivar = ggplot() +  
+    geom_point(data= Othertype_timoivar, aes(x = ALT_FREQ.x, y = ALT_FREQ.y, color = Category), width = 0.2, alpha = 0.4) +
+    geom_point(data=FPlayer_timoivar, aes(x = ALT_FREQ.x, y = ALT_FREQ.y, color = Category), width = 0.2, alpha = 0.4) +
+  labs(x="timo", y= "ivar") +
+  category_colScale_1 +
+  theme_bw()+
+  theme(axis.title = element_text(size = 15))+
+  theme(legend.text = element_text(size = 15))+ 
+  annotate(geom = "text", x = 0.02, y = 0.85, label = "%TP = 70.3%", hjust = "left")+
+  annotate(geom = "text", x = 0.02, y = 0.8, label = "%FP = 0.09%", hjust = "left")
+
+print(Figtimoivar)
+ggsave(Figtimoivar,
+       filename = glue("{workdirectory}/figures_new/Figtimoivar.png"),
+       width = 5,
+       height = 4, limitsize=FALSE)#, useDingbats = FALSE)
+ggsave(Figtimoivar,
+       filename = glue("{workdirectory}/figures_pdf/Figtimoivar.pdf"),
+       width = 5,
+       height = 4, limitsize=FALSE)#, useDingbats = FALSE)
+
+
+#timo vs freebayes
+timofb = merge(Timofreq, freebayesfreq, 
+         by.x =c("POS","CHROM", "REF", "ALT", "Expected_freq", "Copy_number", "Rep"),
+         by.y = c("POS","CHROM", "REF", "ALT", "Expected_freq", "Copy_number", "Rep"), all = T)
+
+timofb = timofb%>%filter(!Copy_number == "control")
+timofb$type.x[is.na(timofb$type.x)] <- "NA"
+timofb$type.y[is.na(timofb$type.y)] <- "NA"
+
+timofb = timofb %>% mutate(Category = ifelse(type.x == 'TP' & type.x == type.y, "both_tp", 
+                               ifelse(type.x == type.y & type.x == 'FP', "both_fp", 
+                               ifelse(type.x == type.y & type.x == 'FN', "both_fn",
+                               ifelse(type.x == "TP" & type.y != "TP", "caller1_tp", 
+                               ifelse(type.x != "TP" & type.y == 'TP', 'caller2_tp', 
+                               ifelse(type.x == 'FP' & type.y == 'NA' | type.x == 'NA' & type.y == 'FP', 'single_fp',
+                               ifelse(type.x == 'FN' & type.y != 'FN' | type.x != 'FN' & type.y == 'FN', 'single_fn',
+                                      "NA"))))))))
+
+#calculate both TP%
+timofb_bothtp = timofb %>% filter(Category == "both_tp")
+#calculate both FP%
+timofb_counts = timofb %>% group_by(Expected_freq, Copy_number, Category) %>% add_tally(name = 'type_count') %>% ungroup() %>%select(Expected_freq, Category,type_count, vcf_inputs.x, vcf_inputs.y, Copy_number) %>% unique() %>% pivot_wider(names_from = Category, values_from = type_count)
+timofb_counts$both_tp[is.na(timofb_counts$both_tp)] = 0
+timofb_counts$both_fp[is.na(timofb_counts$both_fp)] = 0
+timofb_counts$both_fn[is.na(timofb_counts$both_fn)] = 0
+sum(timofb_counts$both_fp)/(sum(timofb_counts$both_fp)+sum(timofb_counts$both_tp))
+
+FPlayer_timofb = timofb %>%  filter(Category == "both_fp")
+Othertype_timofb = timofb %>%  filter(!Category == "both_fp")
+
+Figtimofb = ggplot() +  
+    geom_point(data= Othertype_timofb, aes(x = ALT_FREQ.x, y = ALT_FREQ.y, color = Category), width = 0.2, alpha = 0.4) +
+    geom_point(data=FPlayer_timofb, aes(x = ALT_FREQ.x, y = ALT_FREQ.y, color = Category), width = 0.2, alpha = 0.4) +
+  labs(x="timo", y= "freebayes") +
+  geom_point(width = 0.2, alpha = 0.5) +
+   category_colScale_1  +
+  theme_bw()+
+  theme(axis.title = element_text(size = 15))+
+  theme(legend.text = element_text(size = 15))+ 
+  annotate(geom = "text", x = 0.02, y = 0.85, label = "%TP = 59.2%", hjust = "left")+
+  annotate(geom = "text", x = 0.02, y = 0.8, label = "%FP = 0.10%", hjust = "left")
+
+print(Figtimofb)
+ggsave(Figtimofb,
+       filename = glue("{workdirectory}/figures_new/Figtimofb.png"),
+       width = 5,
+       height = 4, limitsize=FALSE)#, useDingbats = FALSE)
+ggsave(Figtimofb,
+       filename = glue("{workdirectory}/figures_pdf/Figtimofb.pdf"),
+       width = 5,
+       height = 4, limitsize=FALSE)#, useDingbats = FALSE)
+
+#timo vs varscan
+timovarscan = merge(Timofreq, varscanfreq, 
+         by.x =c("POS","CHROM", "REF", "ALT", "Expected_freq", "Copy_number", "Rep"),
+         by.y = c("POS","CHROM", "REF", "ALT", "Expected_freq", "Copy_number", "Rep"), all = T)
+
+timovarscan = timovarscan%>%filter(!Copy_number == "control")
+timovarscan$type.x[is.na(timovarscan$type.x)] <- "NA"
+timovarscan$type.y[is.na(timovarscan$type.y)] <- "NA"
+
+timovarscan = timovarscan %>% mutate(Category = ifelse(type.x == 'TP' & type.x == type.y, "both_tp", 
+                               ifelse(type.x == type.y & type.x == 'FP', "both_fp", 
+                               ifelse(type.x == type.y & type.x == 'FN', "both_fn",
+                               ifelse(type.x == "TP" & type.y != "TP", "caller1_tp", 
+                               ifelse(type.x != "TP" & type.y == 'TP', 'caller2_tp', 
+                               ifelse(type.x == 'FP' & type.y == 'NA' | type.x == 'NA' & type.y == 'FP', 'single_fp',
+                               ifelse(type.x == 'FN' & type.y != 'FN' | type.x != 'FN' & type.y == 'FN', 'single_fn',
+                                      "NA"))))))))
+
+#calculate both TP%
+timovarscan_bothtp = timovarscan %>% filter(Category == "both_tp")
+#calculate both FP%
+timovarscan_counts = timovarscan %>% group_by(Expected_freq, Copy_number, Category) %>% add_tally(name = 'type_count') %>% ungroup() %>%select(Expected_freq, Category,type_count, vcf_inputs.x, vcf_inputs.y, Copy_number) %>% unique() %>% pivot_wider(names_from = Category, values_from = type_count)
+timovarscan_counts$both_tp[is.na(timovarscan_counts$both_tp)] = 0
+timovarscan_counts$both_fp[is.na(timovarscan_counts$both_fp)] = 0
+timovarscan_counts$both_fn[is.na(timovarscan_counts$both_fn)] = 0
+sum(timovarscan_counts$both_fp)/(sum(timovarscan_counts$both_fp)+sum(timovarscan_counts$both_tp))
+
+FPlayer_timovarscan = timovarscan %>%  filter(Category == "both_fp")
+Othertype_timovarscan = timovarscan %>%  filter(!Category == "both_fp")
+
+Figtimovarscan = ggplot() +  
+    geom_point(data= Othertype_timovarscan, aes(x = ALT_FREQ.x, y = ALT_FREQ.y, color = Category), width = 0.2, alpha = 0.4) +
+    geom_point(data=FPlayer_timovarscan, aes(x = ALT_FREQ.x, y = ALT_FREQ.y, color = Category), width = 0.2, alpha = 0.4) +
+  labs(x="timo", y= "varscan") +
+  geom_point(width = 0.2, alpha = 0.5) +
+   category_colScale_1 +
+  theme_bw()+
+  theme(axis.title = element_text(size = 15))+
+  theme(legend.text = element_text(size = 15))+ 
+  annotate(geom = "text", x = 0.02, y = 0.85, label = "%TP = 70.1%", hjust = "left")+
+  annotate(geom = "text", x = 0.02, y = 0.8, label = "%FP = 0.09%", hjust = "left")
+print(Figtimovarscan)
+ggsave(Figtimovarscan,
+       filename = glue("{workdirectory}/figures_new/Figtimovarscan.png"),
+       width = 5,
+       height = 4, limitsize=FALSE)#, useDingbats = FALSE)
+ggsave(Figtimovarscan,
+       filename = glue("{workdirectory}/figures_pdf/Figtimovarscan.pdf"),
+       width = 5,
+       height = 4, limitsize=FALSE)#, useDingbats = FALSE)
+
+
+#ivar vs hc
+ivarhc = merge(ivarfreq, hcfreq, 
+         by.x =c("POS","CHROM", "REF", "ALT", "Expected_freq", "Copy_number", "Rep"),
+         by.y = c("POS","CHROM", "REF", "ALT", "Expected_freq", "Copy_number", "Rep"), all = T)
+
+ivarhc = ivarhc%>%filter(!Copy_number == "control")
+ivarhc$type.x[is.na(ivarhc$type.x)] <- "NA"
+ivarhc$type.y[is.na(ivarhc$type.y)] <- "NA"
+
+ivarhc = ivarhc %>% mutate(Category = ifelse(type.x == 'TP' & type.x == type.y, "both_tp", 
+                               ifelse(type.x == type.y & type.x == 'FP', "both_fp", 
+                               ifelse(type.x == type.y & type.x == 'FN', "both_fn",
+                               ifelse(type.x == "TP" & type.y != "TP", "caller1_tp", 
+                               ifelse(type.x != "TP" & type.y == 'TP', 'caller2_tp', 
+                               ifelse(type.x == 'FP' & type.y == 'NA' | type.x == 'NA' & type.y == 'FP', 'single_fp',
+                               ifelse(type.x == 'FN' & type.y != 'FN' | type.x != 'FN' & type.y == 'FN', 'single_fn',
+                                      "NA"))))))))
+
+#calculate both TP%
+ivarhc_bothtp = ivarhc %>% filter(Category == "both_tp")
+#calculate both FP%
+ivarhc_counts = ivarhc %>% group_by(Expected_freq, Copy_number, Category) %>% add_tally(name = 'type_count') %>% ungroup() %>%select(Expected_freq, Category,type_count, vcf_inputs.x, vcf_inputs.y, Copy_number) %>% unique() %>% pivot_wider(names_from = Category, values_from = type_count)
+ivarhc_counts$both_tp[is.na(ivarhc_counts$both_tp)] = 0
+ivarhc_counts$both_fp[is.na(ivarhc_counts$both_fp)] = 0
+ivarhc_counts$both_fn[is.na(ivarhc_counts$both_fn)] = 0
+sum(ivarhc_counts$both_fp)/(sum(ivarhc_counts$both_fp)+sum(ivarhc_counts$both_tp))
+
+
+Figivarhc = ggplot(ivarhc, aes(x = ALT_FREQ.x, y = ALT_FREQ.y, color = Category)) + 
+  labs(x="ivar", y= "hc") +
+  geom_point(width = 0.2, alpha = 0.5) +
+  category_colScale_1 +
+  theme_bw()+
+  theme(axis.title = element_text(size = 15))+
+  theme(legend.text = element_text(size = 15))+ 
+  annotate(geom = "text", x = 0.02, y = 0.85, label = "%TP = 74.3%", hjust = "left")+
+  annotate(geom = "text", x = 0.02, y = 0.8, label = "%FP = 1.7%", hjust = "left")
+print(Figivarhc)
+ggsave(Figivarhc,
+       filename = glue("{workdirectory}/figures_new/Figivarhc.png"),
+       width = 5,
+       height = 4, limitsize=FALSE)#, useDingbats = FALSE)
+ggsave(Figivarhc,
+       filename = glue("{workdirectory}/figures_pdf/Figivarhc.pdf"),
+       width = 5,
+       height = 4, limitsize=FALSE)#, useDingbats = FALSE)
+
+#ivar vs fb
+ivarfb = merge(ivarfreq, freebayesfreq, 
+         by.x =c("POS","CHROM", "REF", "ALT", "Expected_freq", "Copy_number", "Rep"),
+         by.y = c("POS","CHROM", "REF", "ALT", "Expected_freq", "Copy_number", "Rep"), all = T)
+
+ivarfb = ivarfb%>%filter(!Copy_number == "control")
+ivarfb$type.x[is.na(ivarfb$type.x)] <- "NA"
+ivarfb$type.y[is.na(ivarfb$type.y)] <- "NA"
+
+ivarfb = ivarfb %>% mutate(Category = ifelse(type.x == 'TP' & type.x == type.y, "both_tp", 
+                               ifelse(type.x == type.y & type.x == 'FP', "both_fp", 
+                               ifelse(type.x == type.y & type.x == 'FN', "both_fn",
+                               ifelse(type.x == "TP" & type.y != "TP", "caller1_tp", 
+                               ifelse(type.x != "TP" & type.y == 'TP', 'caller2_tp', 
+                               ifelse(type.x == 'FP' & type.y == 'NA' | type.x == 'NA' & type.y == 'FP', 'single_fp',
+                               ifelse(type.x == 'FN' & type.y != 'FN' | type.x != 'FN' & type.y == 'FN', 'single_fn',
+                                      "NA"))))))))
+
+#calculate both TP%
+ivarfb_bothtp = ivarfb %>% filter(Category == "both_tp")
+#calculate both FP%
+ivarfb_counts = ivarfb %>% group_by(Expected_freq, Copy_number, Category) %>% add_tally(name = 'type_count') %>% ungroup() %>%select(Expected_freq, Category,type_count, vcf_inputs.x, vcf_inputs.y, Copy_number) %>% unique() %>% pivot_wider(names_from = Category, values_from = type_count)
+ivarfb_counts$both_tp[is.na(ivarfb_counts$both_tp)] = 0
+ivarfb_counts$both_fp[is.na(ivarfb_counts$both_fp)] = 0
+ivarfb_counts$both_fn[is.na(ivarfb_counts$both_fn)] = 0
+sum(ivarfb_counts$both_fp)/(sum(ivarfb_counts$both_fp)+sum(ivarfb_counts$both_tp))
+
+FPlayer_ivarfb = ivarfb %>%  filter(Category == "both_fp")
+Othertype_ivarfb = ivarfb %>%  filter(!Category == "both_fp")
+
+Figivarfb = ggplot() +  
+    geom_point(data= Othertype_ivarfb, aes(x = ALT_FREQ.x, y = ALT_FREQ.y, color = Category), width = 0.2, alpha = 0.4) +
+    geom_point(data=FPlayer_ivarfb, aes(x = ALT_FREQ.x, y = ALT_FREQ.y, color = Category), width = 0.2, alpha = 0.4) +
+  labs(x="ivar", y= "freebayes") +
+  geom_point(width = 0.2, alpha = 0.5) +
+  category_colScale_1 +
+  theme_bw()+
+  theme(axis.title = element_text(size = 15))+
+  theme(legend.text = element_text(size = 15))+ 
+  annotate(geom = "text", x = 0.02, y = 0.85, label = "%TP = 73.2%", hjust = "left")+
+  annotate(geom = "text", x = 0.02, y = 0.8, label = "%FP = 4.2%", hjust = "left")
+print(Figivarfb)
+ggsave(Figivarfb,
+       filename = glue("{workdirectory}/figures_new/Figivarfb.png"),
+       width = 5,
+       height = 4, limitsize=FALSE)#, useDingbats = FALSE)
+ggsave(Figivarfb,
+       filename = glue("{workdirectory}/figures_pdf/Figivarfb.pdf"),
+       width = 5,
+       height = 4, limitsize=FALSE)#, useDingbats = FALSE)
+
+#ivar vs varscan
+ivarvarscan = merge(ivarfreq, varscanfreq, 
+         by.x =c("POS","CHROM", "REF", "ALT", "Expected_freq", "Copy_number", "Rep"),
+         by.y = c("POS","CHROM", "REF", "ALT", "Expected_freq", "Copy_number", "Rep"), all = T)
+
+ivarvarscan = ivarvarscan%>%filter(!Copy_number == "control")
+ivarvarscan$type.x[is.na(ivarvarscan$type.x)] <- "NA"
+ivarvarscan$type.y[is.na(ivarvarscan$type.y)] <- "NA"
+
+ivarvarscan = ivarvarscan %>% mutate(Category = ifelse(type.x == 'TP' & type.x == type.y, "both_tp", 
+                               ifelse(type.x == type.y & type.x == 'FP', "both_fp", 
+                               ifelse(type.x == type.y & type.x == 'FN', "both_fn",
+                               ifelse(type.x == "TP" & type.y != "TP", "caller1_tp", 
+                               ifelse(type.x != "TP" & type.y == 'TP', 'caller2_tp', 
+                               ifelse(type.x == 'FP' & type.y == 'NA' | type.x == 'NA' & type.y == 'FP', 'single_fp',
+                               ifelse(type.x == 'FN' & type.y != 'FN' | type.x != 'FN' & type.y == 'FN', 'single_fn',
+                                      "NA"))))))))
+
+#calculate both TP%
+ivarvarscan_bothtp = ivarvarscan %>% filter(Category == "both_tp")
+#calculate both FP%
+ivarvarscan_counts = ivarvarscan %>% group_by(Expected_freq, Copy_number, Category) %>% add_tally(name = 'type_count') %>% ungroup() %>%select(Expected_freq, Category,type_count, vcf_inputs.x, vcf_inputs.y, Copy_number) %>% unique() %>% pivot_wider(names_from = Category, values_from = type_count)
+ivarvarscan_counts$both_tp[is.na(ivarvarscan_counts$both_tp)] = 0
+ivarvarscan_counts$both_fp[is.na(ivarvarscan_counts$both_fp)] = 0
+ivarvarscan_counts$both_fn[is.na(ivarvarscan_counts$both_fn)] = 0
+sum(ivarvarscan_counts$both_fp)/(sum(ivarvarscan_counts$both_fp)+sum(ivarvarscan_counts$both_tp))
+
+FPlayer_ivarvarscan = ivarvarscan %>%  filter(Category == "both_fp")
+Othertype_ivarvarscan = ivarvarscan %>%  filter(!Category == "both_fp")
+
+Figivarvarscan = ggplot() +  
+    geom_point(data= Othertype_ivarvarscan, aes(x = ALT_FREQ.x, y = ALT_FREQ.y, color = Category), width = 0.2, alpha = 0.4) +
+    geom_point(data=FPlayer_ivarvarscan, aes(x = ALT_FREQ.x, y = ALT_FREQ.y, color = Category), width = 0.2, alpha = 0.4) +
+  labs(x="ivar", y= "varscan") +
+  geom_point(width = 0.2, alpha = 0.5) +
+  category_colScale_1 +
+  theme_bw()+
+  theme(axis.title = element_text(size = 15))+
+  theme(legend.text = element_text(size = 15))+ 
+  annotate(geom = "text", x = 0.02, y = 0.85, label = "%TP = 83.1%", hjust = "left")+
+  annotate(geom = "text", x = 0.02, y = 0.8, label = "%FP = 1.02%", hjust = "left")
+print(Figivarvarscan)
+ggsave(Figivarvarscan,
+       filename = glue("{workdirectory}/figures_new/Figivarvarscan.png"),
+       width = 5,
+       height = 4, limitsize=FALSE)#, useDingbats = FALSE)
+ggsave(Figivarvarscan,
+       filename = glue("{workdirectory}/figures_pdf/Figivarvarscan.pdf"),
+       width = 5,
+       height = 4, limitsize=FALSE)#, useDingbats = FALSE)
+
+#hc vs freebayes
+hcfb = merge(hcfreq, freebayesfreq, 
+         by.x =c("POS","CHROM", "REF", "ALT", "Expected_freq", "Copy_number", "Rep"),
+         by.y = c("POS","CHROM", "REF", "ALT", "Expected_freq", "Copy_number", "Rep"), all = T)
+
+hcfb = hcfb%>%filter(!Copy_number == "control")
+hcfb$type.x[is.na(hcfb$type.x)] <- "NA"
+hcfb$type.y[is.na(hcfb$type.y)] <- "NA"
+
+hcfb = hcfb %>% mutate(Category = ifelse(type.x == 'TP' & type.x == type.y, "both_tp", 
+                               ifelse(type.x == type.y & type.x == 'FP', "both_fp", 
+                               ifelse(type.x == type.y & type.x == 'FN', "both_fn",
+                               ifelse(type.x == "TP" & type.y != "TP", "caller1_tp", 
+                               ifelse(type.x != "TP" & type.y == 'TP', 'caller2_tp', 
+                               ifelse(type.x == 'FP' & type.y == 'NA' | type.x == 'NA' & type.y == 'FP', 'single_fp',
+                               ifelse(type.x == 'FN' & type.y != 'FN' | type.x != 'FN' & type.y == 'FN', 'single_fn',
+                                      "NA"))))))))
+
+#calculate both TP%
+hcfb_bothtp = hcfb %>% filter(Category == "both_tp")
+#calculate both FP%
+hcfb_counts = hcfb %>% group_by(Expected_freq, Copy_number, Category) %>% add_tally(name = 'type_count') %>% ungroup() %>%select(Expected_freq, Category,type_count, vcf_inputs.x, vcf_inputs.y, Copy_number) %>% unique() %>% pivot_wider(names_from = Category, values_from = type_count)
+hcfb_counts$both_tp[is.na(hcfb_counts$both_tp)] = 0
+hcfb_counts$both_fp[is.na(hcfb_counts$both_fp)] = 0
+hcfb_counts$both_fn[is.na(hcfb_counts$both_fn)] = 0
+sum(hcfb_counts$both_fp)/(sum(hcfb_counts$both_fp)+sum(hcfb_counts$both_tp))
+
+
+Fighcfb = ggplot(hcfb, aes(x = ALT_FREQ.x, y = ALT_FREQ.y, color = Category)) + 
+  labs(x="hc", y= "freebayes") +
+  geom_point(width = 0.2, alpha = 0.5) +
+  category_colScale_1 +
+  theme_bw()+
+  theme(axis.title = element_text(size = 15))+
+  theme(legend.text = element_text(size = 15))+ 
+  annotate(geom = "text", x = 0.02, y = 0.85, label = "%TP = 69.4%", hjust = "left")+
+  annotate(geom = "text", x = 0.02, y = 0.8, label = "%FP = 1.82%", hjust = "left")
+print(Fighcfb)
+ggsave(Fighcfb,
+       filename = glue("{workdirectory}/figures_new/Fighcfb.png"),
+       width = 5,
+       height = 4, limitsize=FALSE)#, useDingbats = FALSE)
+ggsave(Fighcfb,
+       filename = glue("{workdirectory}/figures_pdf/Fighcfb.pdf"),
+       width = 5,
+       height = 4, limitsize=FALSE)#, useDingbats = FALSE)
+
+#hc vs varscan
+hcvarscan = merge(hcfreq, varscanfreq, 
+         by.x =c("POS","CHROM", "REF", "ALT", "Expected_freq", "Copy_number", "Rep"),
+         by.y = c("POS","CHROM", "REF", "ALT", "Expected_freq", "Copy_number", "Rep"), all = T)
+
+hcvarscan = hcvarscan%>%filter(!Copy_number == "control")
+hcvarscan$type.x[is.na(hcvarscan$type.x)] <- "NA"
+hcvarscan$type.y[is.na(hcvarscan$type.y)] <- "NA"
+
+hcvarscan = hcvarscan %>% mutate(Category = ifelse(type.x == 'TP' & type.x == type.y, "both_tp", 
+                               ifelse(type.x == type.y & type.x == 'FP', "both_fp", 
+                               ifelse(type.x == type.y & type.x == 'FN', "both_fn",
+                               ifelse(type.x == "TP" & type.y != "TP", "caller1_tp", 
+                               ifelse(type.x != "TP" & type.y == 'TP', 'caller2_tp', 
+                               ifelse(type.x == 'FP' & type.y == 'NA' | type.x == 'NA' & type.y == 'FP', 'single_fp',
+                               ifelse(type.x == 'FN' & type.y != 'FN' | type.x != 'FN' & type.y == 'FN', 'single_fn',
+                                      "NA"))))))))
+
+#calculate both TP%
+hcvarscan_bothtp = hcvarscan %>% filter(Category == "both_tp")
+#calculate both FP%
+hcvarscan_counts = hcvarscan %>% group_by(Expected_freq, Copy_number, Category) %>% add_tally(name = 'type_count') %>% ungroup() %>%select(Expected_freq, Category,type_count, vcf_inputs.x, vcf_inputs.y, Copy_number) %>% unique() %>% pivot_wider(names_from = Category, values_from = type_count)
+hcvarscan_counts$both_tp[is.na(hcvarscan_counts$both_tp)] = 0
+hcvarscan_counts$both_fp[is.na(hcvarscan_counts$both_fp)] = 0
+hcvarscan_counts$both_fn[is.na(hcvarscan_counts$both_fn)] = 0
+sum(hcvarscan_counts$both_fp)/(sum(hcvarscan_counts$both_fp)+sum(hcvarscan_counts$both_tp))
+
+
+Fighcvarscan = ggplot(hcvarscan, aes(x = ALT_FREQ.x, y = ALT_FREQ.y, color = Category)) + 
+  labs(x="hc", y= "varscan") +
+  geom_point(width = 0.2, alpha = 0.5) +
+  category_colScale_1 +
+  theme_bw()+
+  theme(axis.title = element_text(size = 15))+
+  theme(legend.text = element_text(size = 15))+ 
+  annotate(geom = "text", x = 0.02, y = 0.85, label = "%TP = 72.1%", hjust = "left")+
+  annotate(geom = "text", x = 0.02, y = 0.8, label = "%FP = 0.84%", hjust = "left")
+print(Fighcvarscan)
+ggsave(Fighcvarscan,
+       filename = glue("{workdirectory}/figures_new/Fighcvarscan.png"),
+       width = 5,
+       height = 4, limitsize=FALSE)#, useDingbats = FALSE)
+ggsave(Fighcvarscan,
+       filename = glue("{workdirectory}/figures_pdf/Fighcvarscan.pdf"),
+       width = 5,
+       height = 4, limitsize=FALSE)#, useDingbats = FALSE)
+
+#fb vs varscan
+fbvarscan = merge(freebayesfreq, varscanfreq, 
+         by.x =c("POS","CHROM", "REF", "ALT", "Expected_freq", "Copy_number", "Rep"),
+         by.y = c("POS","CHROM", "REF", "ALT", "Expected_freq", "Copy_number", "Rep"), all = T)
+
+fbvarscan = fbvarscan%>%filter(!Copy_number == "control")
+fbvarscan$type.x[is.na(fbvarscan$type.x)] <- "NA"
+fbvarscan$type.y[is.na(fbvarscan$type.y)] <- "NA"
+
+fbvarscan = fbvarscan %>% mutate(Category = ifelse(type.x == 'TP' & type.x == type.y, "both_tp", 
+                               ifelse(type.x == type.y & type.x == 'FP', "both_fp", 
+                               ifelse(type.x == type.y & type.x == 'FN', "both_fn",
+                               ifelse(type.x == "TP" & type.y != "TP", "caller1_tp", 
+                               ifelse(type.x != "TP" & type.y == 'TP', 'caller2_tp', 
+                               ifelse(type.x == 'FP' & type.y == 'NA' | type.x == 'NA' & type.y == 'FP', 'single_fp',
+                               ifelse(type.x == 'FN' & type.y != 'FN' | type.x != 'FN' & type.y == 'FN', 'single_fn',
+                                      "NA"))))))))
+
+#calculate both TP%
+fbvarscan_bothtp = fbvarscan %>% filter(Category == "both_tp")
+#calculate both FP%
+fbvarscan_counts = fbvarscan %>% group_by(Expected_freq, Copy_number, Category) %>% add_tally(name = 'type_count') %>% ungroup() %>%select(Expected_freq, Category,type_count, vcf_inputs.x, vcf_inputs.y, Copy_number) %>% unique() %>% pivot_wider(names_from = Category, values_from = type_count)
+fbvarscan_counts$both_tp[is.na(fbvarscan_counts$both_tp)] = 0
+fbvarscan_counts$both_fp[is.na(fbvarscan_counts$both_fp)] = 0
+fbvarscan_counts$both_fn[is.na(fbvarscan_counts$both_fn)] = 0
+sum(fbvarscan_counts$both_fp)/(sum(fbvarscan_counts$both_fp)+sum(fbvarscan_counts$both_tp))
+
+FPlayer_fbvarscan = fbvarscan %>%  filter(Category == "both_fp")
+Othertype_fbvarscan = fbvarscan %>%  filter(!Category == "both_fp")
+
+Figfbvarscan = ggplot() +  
+    geom_point(data= Othertype_fbvarscan, aes(x = ALT_FREQ.x, y = ALT_FREQ.y, color = Category), width = 0.2, alpha = 0.4) +
+    geom_point(data=FPlayer_fbvarscan, aes(x = ALT_FREQ.x, y = ALT_FREQ.y, color = Category), width = 0.2, alpha = 0.4) +
+  labs(x="freebayes", y= "varscan") +
+  geom_point(width = 0.2, alpha = 0.5) +
+  category_colScale_1 +
+  theme_bw()+
+  theme(axis.title = element_text(size = 15))+
+  theme(legend.text = element_text(size = 15))+ 
+  annotate(geom = "text", x = 0.02, y = 0.85, label = "%TP = 70.0%", hjust = "left")+
+  annotate(geom = "text", x = 0.02, y = 0.8, label = "%FP = 1.13%", hjust = "left")
+print(Figfbvarscan)
+ggsave(Figfbvarscan,
+       filename = glue("{workdirectory}/figures_new/Figfbvarscan.png"),
+       width = 5,
+       height = 4, limitsize=FALSE)#, useDingbats = FALSE)
+ggsave(Figfbvarscan,
+       filename = glue("{workdirectory}/figures_pdf/Figfbvarscan.pdf"),
+       width = 5,
+       height = 4, limitsize=FALSE)#, useDingbats = FALSE)
+```
+
+## How does having cutoffs affect variant calling? - Fig S7B,S7C, Fig 4C & 4D
+```{r}
+#Construct cutoff df
+
+#Loop through a vector of frequency cutoffs and read depth cutoffs
+
+freq_list = c(0, 0.01, 0.02, 0.03)
+rd_list = c(0, 100, 200, 300)
+
+vdf_filt = data.frame()
+
+for(f in freq_list){
+    #print(f)
+    
+    for(c in rd_list){
+    
+        #print(c)
+        
+        #print(dim(filt_vdf))
+        
+        fv = vcf_plus %>%
+                mutate(new_category = ifelse(ALT_FREQ >= f & gt_DP >= c & type == 'TP',
+                                            "TP",
+                                            ifelse(ALT_FREQ < f & type == 'TP'| 
+                                                   gt_DP < c & type == 'TP',
+                                                  "FN", 
+                                                  ifelse(type == 'FN',
+                                                        "FN", 
+                                                        ifelse(type == 'FP' & ALT_FREQ >= f & gt_DP >= c,
+                                                              "FP", "TN")))))
+        
+        fv$freq_cut = f
+        
+        fv$cov_cut = c
+        
+        vdf_filt = rbind(vdf_filt, fv)       
+    }
+}
+
+dim(vdf_filt)
+#colnames(vdf_filt)
+
+vdf_filt$category = vdf_filt$new_category
+
+#calculate the number of TP, FP, FN after filtering
+message("Category count for filt data")
+
+vdf_filt = vdf_filt %>% ungroup() %>% unique()
+
+group_columns = c('category',"vcf_inputs",'freq_cut','cov_cut', "Expected_freq", "Copy_number", "Rep")
+
+count_filt = vdf_filt %>% 
+            group_by(across(all_of(group_columns))) %>%
+            add_tally(name = 'category_count') %>%
+            ungroup() %>% 
+            select(all_of(c(group_columns, 'category_count'))) %>%
+            unique() 
+
+# Load function: adjust_count
+adjust_counts = function(count_df){
+
+    count_df = count_df %>%
+                pivot_wider(names_from = category, values_from = category_count)
+
+
+    if (!"FP" %in% colnames(count_df)){
+
+      print("No false-positives - adjusting")
+
+      count_df$FP = 0
+
+    }else{print("FP present - no adjustment needed")}
+
+    count_df[is.na(count_df)] = 0
+
+    count_df$TPR = count_df$TP/(count_df$TP + count_df$FN)
+
+    count_df$PPV = count_df$TP/(count_df$TP + count_df$FP)
+
+    count_df$FNR = count_df$FN/(count_df$FN + count_df$TP)
+
+    count_df$FDR = count_df$FP/(count_df$FP + count_df$TP)
+
+    count_df$F1 = 2 * ((count_df$PPV * count_df$TPR)/(count_df$PPV + count_df$TPR))
+
+    count_df[is.na(count_df)] = 0
+
+    #count_df$gt_DP = as.numeric(as.character(count_df$gt_DP))
+
+    return(count_df)
+}
+
+# put that count dataframe into the 'adjust_counts' function
+message("Adjust filtered count df")
+df_filt = adjust_counts(count_filt)
+
+df_filt = df_filt %>% filter (cov_cut == "0", Rep == "rep1") %>% group_by(cov_cut, freq_cut, vcf_inputs, Expected_freq, Copy_number, Rep) %>% mutate(TP_percentage = TP/(TP + FN + FP), FP_percentage = FP/(TP + FN + FP), FN_percentage = FN/(TP + FN + FP)) %>% unique() %>% group_by(Copy_number, vcf_inputs, freq_cut, cov_cut) %>% mutate(Mean_TP = mean(TP_percentage), sd_TP = sd(TP_percentage))%>% group_by(Copy_number, vcf_inputs, freq_cut, cov_cut) %>% mutate(Mean_FP = mean(FP_percentage), sd_FP = sd(FP_percentage))%>% group_by(Copy_number, vcf_inputs, freq_cut, cov_cut) %>% mutate(Mean_FN = mean(FN_percentage), sd_FN = sd(FN_percentage))
+df_filt = df_filt %>% filter(Copy_number != "control")
+
+df_filt$freq_cut = as.character(df_filt$freq_cut)
+
+
+
+#update replicates df with new SNV_info   
+
+rep1 = vcf_plus %>% filter(Rep == "rep1") %>% filter(!FerretID %in% c("Mix37", "Mix38", "Mix39", "Mix40", "Mix41", "Mix42", "Mix44"))
+rep2 = vcf_plus %>% filter(Rep == "rep2") %>% filter(!FerretID %in% c("Mix37", "Mix38", "Mix39", "Mix40", "Mix41", "Mix42", "Mix44"))
+
+# merge the replicates 
+replicates = merge(rep1, rep2, 
+by.x =c('CHROM', "Copy_number", "POS", "Expected_freq", "REF", "ALT", "ChromKey", "vcf_inputs", "Use", "Cohort", "repname"),
+
+by.y = c('CHROM', "Copy_number", "POS", "Expected_freq", "REF", "ALT", "ChromKey", "vcf_inputs", "Use", "Cohort", "Sample"),  all = T)
+#Change NA to zero 
+replicates$ALT_FREQ.x[is.na(replicates$ALT_FREQ.x)] = 0
+replicates$ALT_FREQ.y[is.na(replicates$ALT_FREQ.y)] = 0
+replicates$type.x[is.na(replicates$type.x)] = "NONE"
+replicates$type.y[is.na(replicates$type.y)] = "NONE"
+# Remove the controls for this analysis 
+replicates = replicates %>% filter(!Copy_number == "control")
+
+# specify the four categories 
+
+replicates = replicates %>% mutate(Category = ifelse(type.x == 'TP' & type.x == type.y, "both_tp", 
+                               ifelse(type.x == type.y & type.x == 'FP', "both_fp", 
+                               ifelse(type.x == "TP" & type.y != "TP", "rep1_tp", 
+                               ifelse(type.x != "TP" & type.y == 'TP', 'rep2_tp', 
+                               ifelse(type.x == 'FN' & type.x == type.y, "both_fn",
+                               ifelse(type.x == 'FP' & type.y != 'FP' | type.x != 'FP' & type.y == 'FP', 'single_fp', "NA")))))))  
+  
+across_replicates = replicates %>% filter(Category == "both_tp" | Category =="both_fp" |Category =="both_fn")
+
+#Count the number of TP, FN, FP
+type_counts_two_rep = across_replicates %>% group_by(Expected_freq, Category, vcf_inputs, Copy_number, CHROM) %>% add_tally(name = 'type_count') %>% ungroup() %>% select(Expected_freq, Category,type_count, vcf_inputs, Copy_number, CHROM) %>% unique()
+
+#make sure for each expected freq + copy number set, the sum of TP & FN is the same (becuase combined they are the total number of SNVs)
+type_counts_two_rep =  type_counts_two_rep %>% pivot_wider(names_from = Category, values_from = type_count) 
+#type_counts_individual_rep[is.na(type_counts_individual_rep)] = 0
+type_counts_two_rep$both_fp[is.na(type_counts_two_rep$both_fp)] = 0
+type_counts_two_rep$both_tp[is.na(type_counts_two_rep$both_tp)] = 0
+
+
+type_counts_two_rep = across_replicates %>% group_by(Expected_freq, Category, vcf_inputs, Copy_number) %>% add_tally(name = 'type_count') %>% ungroup() %>% select(Expected_freq, Category,type_count, vcf_inputs, Copy_number) %>% unique()
+
+#make sure for each expected freq + copy number set, the sum of TP & FN is the same (becuase combined they are the total number of SNVs)
+type_counts_two_rep =  type_counts_two_rep %>% pivot_wider(names_from = Category, values_from = type_count) 
+#type_counts_individual_rep[is.na(type_counts_individual_rep)] = 0
+type_counts_two_rep$both_fp[is.na(type_counts_two_rep$both_fp)] = 0
+type_counts_two_rep$both_tp[is.na(type_counts_two_rep$both_tp)] = 0
+#type_counts_individual_rep = type_counts_individual_rep %>% group_by(Expected_freq,vcf_inputs) %>% mutate(SNV_count = both_fn + both_tp)
+type_counts_two_rep["Rep"] = "Merged"
+colnames(type_counts_two_rep)[4] <- "FN"
+colnames(type_counts_two_rep)[5] <- "TP"
+colnames(type_counts_two_rep)[6] <- "FP"
+
+#Calculate TP percentage and FP percentage
+type_counts_two_rep = type_counts_two_rep %>% group_by(vcf_inputs, Expected_freq, Copy_number) %>% mutate(TP_percentage = TP/(TP + FN + FP), FP_percentage = FP/(TP + FP), FN_percentage = FN/(TP + FN)) %>% unique() #%>% group_by(Copy_number, vcf_inputs) %>% mutate(Mean_TP = mean(TP_percentage), sd_TP = sd(TP_percentage))%>% group_by(Copy_number, vcf_inputs) %>% mutate(Mean_FP = mean(FP_percentage), sd_FP = sd(FP_percentage))%>% group_by(Copy_number, vcf_inputs) %>% mutate(Mean_FN = mean(FN_percentage), sd_FN = sd(FN_percentage))
+
+type_counts_two_rep$FP_percentage[is.na(type_counts_two_rep$FP_percentage)] = 0
+type_counts_two_rep$FN_percentage[is.na(type_counts_two_rep$FN_percentage)] = 0
+
+
+
+FigS7B = ggplot()+
+geom_line(data = df_filt %>% filter(Copy_number %in% c("10^3", "10^6"), vcf_inputs %in% c("freebayes", "ivar", "timo", "varscan")), 
+            aes(x=Expected_freq, 
+                y = FDR,  
+                group = interaction(freq_cut, Copy_number), 
+                linetype = freq_cut,
+                color = vcf_inputs), alpha = 0.8, size = 1) +
+  geom_point(data=df_filt%>% filter(Copy_number %in% c("10^3", "10^6"), vcf_inputs %in% c("freebayes", "ivar", "timo", "varscan")),
+                aes(x=Expected_freq, y=FDR, 
+                    colour = vcf_inputs, shape = Copy_number), 
+             alpha = 0.9, size = 2) +
+
+  geom_line(data = type_counts_two_rep%>% filter( Copy_number %in% c("10^3", "10^6"), vcf_inputs %in% c("freebayes", "ivar", "timo", "varscan")), 
+            aes(x=Expected_freq, y= FP_percentage, 
+                group = interaction(Rep, Copy_number)),
+           color = 'black', 
+           alpha = 0.8)+
+  geom_point(data=type_counts_two_rep%>% filter(Copy_number %in% c("10^3", "10^6"), vcf_inputs %in% c("freebayes", "ivar", "timo", "varscan")),
+                aes(x=Expected_freq, y= FP_percentage, shape = Copy_number,),
+             color = 'black',
+             alpha = 0.9)+
+  tool_colScale + 
+  
+  #labs(x="Copy Number", y= "FDR") +
+  
+  theme_bw() +
+  
+  facet_grid(Copy_number~vcf_inputs) +
+  
+  theme(legend.key = element_blank(),
+                strip.background = element_rect(colour="black", fill="white"),
+              axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+print(FigS7B)
+ggsave(FigS7B,
+       filename = glue("{workdirectory}/figures_pdf_new/FigS7B.pdf"),  
+       width = 9,
+       height = 5, limitsize=FALSE, useDingbats = FALSE)
+
+FigS7B_2 = ggplot()+
+geom_line(data = df_filt %>% filter(Copy_number %in% c("10^3", "10^6"), vcf_inputs %in% c("hc", "lofreq", "mutect2")), 
+            aes(x=Expected_freq, 
+                y = FDR,  
+                group = interaction(freq_cut, Copy_number), 
+                linetype = freq_cut,
+                color = vcf_inputs), alpha = 0.8, size = 1) +
+  geom_point(data=df_filt%>% filter(Copy_number %in% c("10^3", "10^6"), vcf_inputs %in% c("hc", "lofreq", "mutect2")),
+                aes(x=Expected_freq, y=FDR, 
+                    colour = vcf_inputs, shape = Copy_number), 
+             alpha = 0.9, size = 2) +
+
+  geom_line(data = type_counts_two_rep%>% filter( Copy_number %in% c("10^3", "10^6"), vcf_inputs %in% c("hc", "lofreq", "mutect2")), 
+            aes(x=Expected_freq, y= FP_percentage, 
+                group = interaction(Rep, Copy_number)),
+           color = 'black', 
+           alpha = 0.8)+
+  geom_point(data=type_counts_two_rep%>% filter(Copy_number %in% c("10^3", "10^6"), vcf_inputs %in% c("hc", "lofreq", "mutect2")),
+                aes(x=Expected_freq, y= FP_percentage, shape = Copy_number,),
+             color = 'black',
+             alpha = 0.9)+
+  tool_colScale + 
+  
+  #labs(x="Copy Number", y= "FDR") +
+  
+  theme_bw() +
+  
+  facet_grid(Copy_number~vcf_inputs) +
+  
+  theme(legend.key = element_blank(),
+                strip.background = element_rect(colour="black", fill="white"),
+              axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+print(FigS7B_2)
+ggsave(FigS7B_2,
+       filename = glue("{workdirectory}/figures_pdf_new/FigS7B_2.pdf"),  
+       width = 7,
+       height = 5, limitsize=FALSE, useDingbats = FALSE)
+
+
+FigS7C = ggplot()+
+geom_line(data = df_filt %>% filter(Copy_number %in% c("10^3", "10^6"), vcf_inputs %in% c("freebayes", "ivar", "timo", "varscan")), 
+            aes(x=Expected_freq, 
+                y = FNR,  
+                group = interaction(freq_cut, Copy_number), 
+                linetype = freq_cut,
+                color = vcf_inputs), alpha = 0.8, size = 1) +
+  geom_point(data=df_filt%>% filter(Copy_number %in% c("10^3", "10^6"), vcf_inputs %in% c("freebayes", "ivar", "timo", "varscan")),
+                aes(x=Expected_freq, y=FNR, 
+                    colour = vcf_inputs, shape = Copy_number), 
+             alpha = 0.9, size = 2) +
+
+  geom_line(data = type_counts_two_rep%>% filter( Copy_number %in% c("10^3", "10^6"), vcf_inputs %in% c("freebayes", "ivar", "timo", "varscan")), 
+            aes(x=Expected_freq, y= FN_percentage, 
+                group = interaction(Rep, Copy_number)),
+           color = 'black', 
+           alpha = 0.8)+
+  geom_point(data=type_counts_two_rep%>% filter(Copy_number %in% c("10^3", "10^6"), vcf_inputs %in% c("freebayes", "ivar", "timo", "varscan")),
+                aes(x=Expected_freq, y= FN_percentage, shape = Copy_number,),
+             color = 'black',
+             alpha = 0.9)+
+  tool_colScale + 
+  
+  #labs(x="Copy Number", y= "FDR") +
+  
+  theme_bw() +
+  
+  facet_grid(Copy_number~vcf_inputs) +
+  
+  theme(legend.key = element_blank(),
+                strip.background = element_rect(colour="black", fill="white"),
+              axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+print(FigS7C)
+ggsave(FigS7C,
+       filename = glue("{workdirectory}/figures_pdf_new/FigS7C.pdf"),  
+       width = 9,
+       height = 5, limitsize=FALSE, useDingbats = FALSE)
+
+FigS7C_2 = ggplot()+
+geom_line(data = df_filt %>% filter(Copy_number %in% c("10^3", "10^6"), vcf_inputs %in% c("hc", "lofreq", "mutect2")), 
+            aes(x=Expected_freq, 
+                y = FNR,  
+                group = interaction(freq_cut, Copy_number), 
+                linetype = freq_cut,
+                color = vcf_inputs), alpha = 0.8, size = 1) +
+  geom_point(data=df_filt%>% filter(Copy_number %in% c("10^3", "10^6"), vcf_inputs %in% c("hc", "lofreq", "mutect2")),
+                aes(x=Expected_freq, y=FNR, 
+                    colour = vcf_inputs, shape = Copy_number), 
+             alpha = 0.9, size = 2) +
+
+  geom_line(data = type_counts_two_rep%>% filter( Copy_number %in% c("10^3", "10^6"), vcf_inputs %in% c("hc", "lofreq", "mutect2")), 
+            aes(x=Expected_freq, y= FN_percentage, 
+                group = interaction(Rep, Copy_number)),
+           color = 'black', 
+           alpha = 0.8)+
+  geom_point(data=type_counts_two_rep%>% filter(Copy_number %in% c("10^3", "10^6"), vcf_inputs %in% c("hc", "lofreq", "mutect2")),
+                aes(x=Expected_freq, y= FN_percentage, shape = Copy_number,),
+             color = 'black',
+             alpha = 0.9)+
+  tool_colScale + 
+  
+  #labs(x="Copy Number", y= "FDR") +
+  
+  theme_bw() +
+  
+  facet_grid(Copy_number~vcf_inputs) +
+  
+  theme(legend.key = element_blank(),
+                strip.background = element_rect(colour="black", fill="white"),
+              axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+print(FigS7C_2)
+ggsave(FigS7C_2,
+       filename = glue("{workdirectory}/figures_pdf_new/FigS7C_2.pdf"),  
+       width = 7,
+       height = 5, limitsize=FALSE, useDingbats = FALSE)
+
+# Looking at 10^5 only
+
+Fig4C = ggplot()+
+geom_line(data = df_filt %>% filter( Copy_number == "10^5"), 
+            aes(x=Expected_freq, 
+                y = FDR, 
+                group = freq_cut, 
+                linetype = freq_cut,
+                color = vcf_inputs), alpha = 0.8, size = 1) +
+  geom_point(data=df_filt%>% filter( Copy_number == "10^5"),
+                aes(x=Expected_freq, y=FDR, 
+                    colour = vcf_inputs), 
+             alpha = 0.9, size = 2) +
+
+  geom_line(data = type_counts_two_rep%>% filter( Copy_number == "10^5"), 
+            aes(x=Expected_freq, y= FP_percentage, 
+                group = Rep),
+           color = 'black', 
+           alpha = 0.8)+
+  geom_point(data=type_counts_two_rep%>% filter( Copy_number == "10^5"),
+                aes(x=Expected_freq, y= FP_percentage),
+             color = 'black',
+             alpha = 0.9)+
+  tool_colScale + 
+  
+  #labs(x="Copy Number", y= "FDR") +
+  
+  theme_bw() +
+  
+  facet_grid(.~vcf_inputs) +
+  
+  theme(legend.key = element_blank(),
+                strip.background = element_rect(colour="black", fill="white"),
+              axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+print(Fig4C)
+
+ggsave(Fig4C,
+       filename = glue("{workdirectory}/figures_pdf_new/Fig4C.pdf"),  
+       width = 15,
+       height = 4, limitsize=FALSE, useDingbats = FALSE)
+
+Fig4D = ggplot()+
+geom_line(data = df_filt %>% filter( Copy_number == "10^5"), 
+            aes(x=Expected_freq, 
+                y = FNR, 
+                group = freq_cut, 
+                linetype = freq_cut,
+                color = vcf_inputs), alpha = 0.8, size = 1) +
+  geom_point(data=df_filt%>% filter( Copy_number == "10^5"),
+                aes(x=Expected_freq, y=FNR, 
+                    colour = vcf_inputs), 
+             alpha = 0.9, size = 2) +
+
+  geom_line(data = type_counts_two_rep%>% filter( Copy_number == "10^5"), 
+            aes(x=Expected_freq, y= FN_percentage, 
+                group = Rep),
+           color = 'black', 
+           alpha = 0.8)+
+  geom_point(data=type_counts_two_rep%>% filter( Copy_number == "10^5"),
+                aes(x=Expected_freq, y= FN_percentage),
+             color = 'black',
+             alpha = 0.9)+
+  tool_colScale + 
+  
+  #labs(x="Copy Number", y= "FDR") +
+  
+  theme_bw() +
+  
+  facet_grid(.~vcf_inputs) +
+  
+  theme(legend.key = element_blank(),
+                strip.background = element_rect(colour="black", fill="white"),
+              axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+print(Fig4D)
+
+ggsave(Fig4D,
+       filename = glue("{workdirectory}/figures_pdf_new/Fig4D.pdf"),  
+       width = 15,
+       height = 4, limitsize=FALSE, useDingbats = FALSE)
+
+```
+
+## FigS8C & S8D
+```{r}
+df_filt = adjust_counts(count_filt)
+
+df_filt = df_filt %>% filter(freq_cut == "0", Rep == "rep1") %>% group_by(cov_cut, freq_cut, vcf_inputs, Expected_freq, Copy_number, Rep) %>% mutate(TP_percentage = TP/(TP + FN + FP), FP_percentage = FP/(TP + FN + FP), FN_percentage = FN/(TP + FN + FP)) %>% unique() %>% group_by(Copy_number, vcf_inputs, freq_cut, cov_cut) %>% mutate(Mean_TP = mean(TP_percentage), sd_TP = sd(TP_percentage))%>% group_by(Copy_number, vcf_inputs, freq_cut, cov_cut) %>% mutate(Mean_FP = mean(FP_percentage), sd_FP = sd(FP_percentage))%>% group_by(Copy_number, vcf_inputs, freq_cut, cov_cut) %>% mutate(Mean_FN = mean(FN_percentage), sd_FN = sd(FN_percentage))
+df_filt = df_filt %>% filter(Copy_number != "control")
+df_filt$cov_cut = as.character(df_filt$cov_cut)
+
+FigS8C = ggplot()+
+geom_line(data = df_filt %>% filter( Copy_number == "10^5"), 
+            aes(x=Expected_freq, 
+                y = FDR, 
+                group = cov_cut, 
+                linetype = cov_cut,
+                color = vcf_inputs), alpha = 0.8, size = 1) +
+  geom_point(data=df_filt%>% filter( Copy_number == "10^5"),
+                aes(x=Expected_freq, y=FDR, 
+                    colour = vcf_inputs), 
+             alpha = 0.9, size = 2) +
+
+  geom_line(data = type_counts_two_rep%>% filter( Copy_number == "10^5"), 
+            aes(x=Expected_freq, y= FP_percentage, 
+                group = Rep),
+           color = 'black', 
+           alpha = 0.8)+
+  geom_point(data=type_counts_two_rep%>% filter( Copy_number == "10^5"),
+                aes(x=Expected_freq, y= FP_percentage),
+             color = 'black',
+             alpha = 0.9)+
+  tool_colScale + 
+  
+  #labs(x="Copy Number", y= "FDR") +
+  
+  theme_bw() +
+  facet_grid(.~vcf_inputs) +
+  
+  theme(legend.key = element_blank(),
+                strip.background = element_rect(colour="black", fill="white"),
+              axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+print(FigS8C)
+
+ggsave(FigS8C,
+       filename = glue("{workdirectory}/figures_pdf_new/FigS8C.pdf"),  
+       width = 15,
+       height = 4, limitsize=FALSE, useDingbats = FALSE)
+
+FigS8D = ggplot()+
+geom_line(data = df_filt %>% filter( Copy_number == "10^5"), 
+            aes(x=Expected_freq, 
+                y = FNR, 
+                group = cov_cut, 
+                linetype = cov_cut,
+                color = vcf_inputs), alpha = 0.8, size = 1) +
+  geom_point(data=df_filt%>% filter( Copy_number == "10^5"),
+                aes(x=Expected_freq, y=FNR, 
+                    colour = vcf_inputs), 
+             alpha = 0.9, size = 2) +
+
+  geom_line(data = type_counts_two_rep%>% filter( Copy_number == "10^5"), 
+            aes(x=Expected_freq, y= FN_percentage, 
+                group = Rep),
+           color = 'black', 
+           alpha = 0.8)+
+  geom_point(data=type_counts_two_rep%>% filter( Copy_number == "10^5"),
+                aes(x=Expected_freq, y= FN_percentage),
+             color = 'black',
+             alpha = 0.9)+
+  tool_colScale + 
+  
+  #labs(x="Copy Number", y= "FDR") +
+  
+  theme_bw() +
+  facet_grid(.~vcf_inputs) +
+  
+  theme(legend.key = element_blank(),
+                strip.background = element_rect(colour="black", fill="white"),
+              axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+print(FigS8D)
+ggsave(FigS8D,
+       filename = glue("{workdirectory}/figures_pdf_new/FigS8D.pdf"),  
+       width = 15,
+       height = 4, limitsize=FALSE, useDingbats = FALSE)
+```
+
+## Fig3B
+```{r}
+FP = vcf_plus %>% filter(type == "FP", Copy_number != "control")
+FP%>% filter(ALT_FREQ>0.75)
+
+PlotTheme1 = theme_bw() +
+            theme(legend.key = element_blank(),
+                  strip.background = element_rect(colour= "black", fill= "white"),
+                  axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+plot3b1 = ggplot(FP, aes(x=ALT_FREQ, y = gt_DP, color = vcf_inputs)) + 
+    geom_point(alpha = 0.8, size = 2) + 
+    tool_colScale +
+    PlotTheme1 +
+    geom_hline(yintercept = 500, linetype = 2, color = 'black') + 
+    geom_vline(xintercept = 0.03, linetype = 2, color = 'black') + 
+    theme(legend.position = 'NONE') + 
+    labs(x="allele frequency", y = 'read depth')
+print(plot3b1)
+
+ggsave(plot3b1,
+       filename = glue("{workdirectory}/figures_pdf_new/Fig3B1_flu_synthetic.pdf"),
+       width = 4,
+       height = 4, limitsize=FALSE, useDingbats = FALSE)
+
+plot3b2 = ggplot(FP, aes(x=gt_DP, fill = vcf_inputs)) + 
+    geom_histogram(binwidth = 500) + 
+    tool_colScale_fill +
+    PlotTheme1 +
+    theme(legend.position = 'NONE') + 
+    labs(x="read depth", y= "false positive count") +
+   # facet_grid(.~vcf_inputs) +
+    coord_flip() +
+    scale_x_continuous(position = "top")
+print(plot3b2)
+
+ggsave(plot3b2,
+       filename = glue("{workdirectory}/figures_pdf_new/Fig3B2_flu_synthetic.pdf"),
+       width = 2,
+       height = 4, limitsize=FALSE, useDingbats = FALSE)
+
+plot3b3 = ggplot(FP, aes(x=ALT_FREQ, fill = vcf_inputs)) + 
+    geom_histogram(binwidth = 0.02) + 
+    tool_colScale_fill +
+    PlotTheme1 +
+    theme(legend.position = 'NONE') + 
+    labs(x="allele frequency", y = 'false positive count')+
+    scale_x_continuous(position = "top")
+print(plot3b3)
+
+ggsave(plot3b3,
+       filename = glue("{workdirectory}/figures_pdf_new/Fig3B3_flu_synthetic.pdf"),
+       width = 4,
+       height = 2, limitsize=FALSE, useDingbats = FALSE)
+```
+

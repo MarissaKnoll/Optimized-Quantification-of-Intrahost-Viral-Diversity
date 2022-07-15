@@ -1,0 +1,213 @@
+---
+title: "Data analysis for Optimization of SNV calling, synthetic SARS-Cov-2 RNA part"
+author: "Bessie Wang"
+date: "4/11/2022"
+output: html_document
+---
+# This notebook generates the following figures for the manuscript:
+- Figure 3A (SARS)
+- Supp. Fig 6C
+
+# Required inputs to run notebook:
+## R functions:
+- maf_functions.R
+## Input SNV file:
+- SNV_info_SARS.csv
+## Metadata outlining samples within the matrix 
+- metadata_sars.csv
+# Load necessary packages
+```{r}
+library('ggplot2')
+library('plyr')
+library('tidyverse')
+library('dplyr')
+library('glue')
+library('vcfR')
+library('tools')
+library('seqinr')
+library('plotly')
+```
+
+# Set working directory 
+```{r setup}
+workdirectory= "/Users/bessiewang/Desktop/GreshamLab/syntheticcontrols/" # set this as its own variable so it is super easy to change later
+knitr::opts_knit$set(root.dir = workdirectory)  # this should set the rmd root directory so you don't have to type out 'workdirectory' later on (you still can if you want it doesn't matter)
+getwd()  # this should tell you what directory you are working in
+```
+#load vivaldi scripts (process all the vcf files and output a single dataframe)
+```{r}
+source(glue('{workdirectory}scripts/maf_functions/read_reference_fasta_dna.R')) 
+source(glue('{workdirectory}scripts/maf_functions/arrange_gt_data.R'))
+source(glue('{workdirectory}scripts/maf_functions/arrange_no_gt_data.R'))
+source(glue('{workdirectory}scripts/maf_functions/arrange_gt_varscan.R'))
+source(glue('{workdirectory}scripts/maf_functions/add_metadata.R'))
+source(glue('{workdirectory}scripts/maf_functions/filter_variants.R'))
+source(glue('{workdirectory}scripts/maf_functions/prepare_annotations.R'))
+source(glue('{workdirectory}scripts/maf_functions/snpeff_info.R'))
+source(glue('{workdirectory}scripts/maf_functions/shannon_entropy.R'))
+source(glue('{workdirectory}scripts/maf_functions/plot_shannon.R'))
+source(glue('{workdirectory}scripts/maf_functions/tally_it.R'))
+source(glue('{workdirectory}scripts/maf_functions/tstv_ratio.R'))
+source(glue('{workdirectory}scripts/maf_functions/tstv_plot.R'))
+source(glue('{workdirectory}scripts/maf_functions/snv_location.R'))
+```
+# Run arrange_gt_data on ivar, timo, haplotypecaller, mutect2, freebayes data under standard setting
+```{r}
+vcf_df_sars = arrange_gt_data( glue('{workdirectory}/SARS_synthetic/'), glue('{workdirectory}/SARS_synthetic/Reference_coding_SARS.fa'), annotated = 'no', ntlist=c('A','G','T','C'))
+```
+
+# Run loferq data under standard setting
+```{r}
+vcf_df_lofreq_sars = arrange_no_gt_data( glue('{workdirectory}/SARS_lofreq/'), glue('{workdirectory}/SARS_lofreq/Reference_coding_SARS.fa'), annotated = 'no', ntlist=c('A','G','T','C'))
+
+#Modify lofreq df for later rbind 
+vcf_df_lofreq_sars = vcf_df_lofreq_sars %>% add_column(REF_COUNT = NA) %>% add_column(ALT_COUNT = NA) %>% add_column(ChromKey = NA)
+vcf_df_lofreq_sars$AF = NULL
+```
+
+# Run varscan data under standard setting
+```{r}
+vcf_df_var_sars = arrange_gt_data_varscan( glue('{workdirectory}/SARS_varscan/'), glue('{workdirectory}/SARS_varscan/Reference_coding_SARS.fa'), annotated = 'no', ntlist=c('A','G','T','C'))
+
+vcf_df_var_sars = vcf_df_var_sars %>% add_column(ChromKey = NA)
+```
+
+#Merge df for all the callers
+```{r}
+vcf_df_s = rbind(vcf_df_sars, vcf_df_lofreq_sars, vcf_df_var_sars)
+```
+
+# Modify vcf_df
+```{r} 
+vcf_df_s$sample_name = vcf_df_s$sample
+#print(head(vcf_df))
+vcf_df_s = vcf_df_s %>% separate(sample_name, c("filename", "vcf_inputs"), sep='[_]')
+```
+
+# read in metadata 
+```{r}
+metadata_s = read.csv("metadata_sars.csv", header = T)
+#print(head(metadata))
+```
+
+# Merge the metadata with vcf_df
+```{r}
+vcf_full_s = merge(vcf_df_s, metadata_s, by=c('filename'), all.x = T) 
+#print(head(vcf_full))
+```
+#checking to make sure that the dimensions after merging are identical 
+```{r}
+dim(vcf_df_s)
+dim(vcf_full_s)
+```
+# Merge vcf_full with SNV_info to select TP, FP, TN
+```{r}
+SNVinfo_s = read.csv("SNV_info_SARS.csv", header = T, check.names = FALSE)
+
+#Right now the SNV_info is in wide format, change that into long format using pivot_longer
+# we need the columns Copy_number and Expected_freq to be able to merge with your variant data, after merging na will appear in 'True' variables if it is a false-positive call! 
+SNVinfo_s = SNVinfo_s %>% pivot_longer(c("100000","10000","1000", "100"), names_to = "TrueExpectedCopyNumber", values_to = "Copy_number")
+
+SNVinfo_s = SNVinfo_s %>% pivot_longer(c("0.0025", "0.005", "0.01", "0.02", "0.05", "0.1", "1"), names_to = "TrueExpectedFrequency", values_to = "Expected_freq")
+
+
+#Merge SNVinfo with vcf_full
+vcf_plus_s = merge(vcf_full_s, SNVinfo_s, by=c("POS", "REF", "ALT", "Copy_number", "Expected_freq", "vcf_inputs"), all = TRUE)
+
+#Replace NAs with 0
+# use = 0 instead of = "0" so the following if_else can work (numeric values to use >, =, <)
+vcf_plus_s$Expected_freq[is.na(vcf_plus_s$Expected_freq)] = 0
+vcf_plus_s$ALT_FREQ[is.na(vcf_plus_s$ALT_FREQ)] = 0
+
+vcf_plus_s$TrueExpectedCopyNumber[is.na(vcf_plus_s$TrueExpectedCopyNumber)] = 0
+vcf_plus_s$TrueExpectedFrequency[is.na(vcf_plus_s$TrueExpectedFrequency)] = 0
+
+#Using if.else to determine TP, FP, FN
+vcf_plus_s = vcf_plus_s %>% mutate(type = ifelse( ALT_FREQ > 0 & TrueExpectedFrequency == 0, "FP",
+                                   ifelse(ALT_FREQ == 0 & TrueExpectedFrequency > 0, "FN",
+                                   ifelse(ALT_FREQ > 0 & TrueExpectedFrequency > 0, "TP", "NA"))))
+#vcf_plus_s %>% filter(POS == "14408")
+```
+## What is the relationship between observed and expected allele frequency estimates? - Fig 3A, Fig S6C
+```{r}
+# Use only TPs - so we can answer the question: of the TP snps that we did find, how close were they to the expected freq?
+#True positives 
+TP_s = vcf_plus_s %>% filter (type == "TP")
+#write.csv(TP,"/Users/bessiewang/Desktop/GreshamLab/syntheticcontrols\\TP.csv", row.names = FALSE)
+#TP$vcf_inputs <- replace(TP$vcf_inputs, TP$vcf_inputs=="haplotypecaller", "hc")
+
+# Set colors for callers
+tool_colors = c('#CC2F42', # freebayes - red
+                 '#35B6E9', # hc - bright blue
+                 '#009E73', # ivar - green
+                 '#F9BECD', # lofreq - pink
+                 '#F0E442', # mutect2 - yellow
+                 '#CCD2EB', # timo - light purple
+                 '#9B9E9A') # varscan, grey
+tools = c("freebayes", "hc", "ivar", "lofreq", "mutect2", "timo", "varscan")
+names(tool_colors) = tools
+tool_colScale_fill <- scale_fill_manual(name = "Variant Caller",values = tool_colors)
+tool_colScale <- scale_colour_manual(name = "Variant Caller",values = tool_colors)
+
+
+TPmedian_s = TP_s %>% group_by(TrueExpectedFrequency, CHROM) %>% summarise(medianfreq = median(ALT_FREQ))
+
+TP_s = merge(TP_s, TPmedian_s, by = c("TrueExpectedFrequency", "CHROM"))
+
+
+Fig3A_s = ggplot(TP_s, aes(x = factor(round(medianfreq, digits = 3)), y = ALT_FREQ, color = vcf_inputs))+
+  labs(x="Median observed Frequency", y= "Observed Frequency") +
+  geom_point(width = 0.2, alpha = 0.3, position=position_dodge(width = 0.5)) + 
+  tool_colScale+
+  facet_grid(.~CHROM, scales = "free", space = "free")  + 
+  theme_bw() +
+  theme(axis.title = element_text(size = 15))+
+  theme(legend.text = element_text(size = 13))+ 
+  theme(legend.key = element_blank(),
+                strip.background = element_rect(colour="black", fill="white"),
+                axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+  stat_summary(fun = "median", geom = "point", col = "black",size = 2,shape = 18,fill = "red")
+print(Fig3A_s)
+ggsave(Fig3A_s,
+       filename = glue("{workdirectory}/figures_pdf_new/Fig3A_sars.pdf"),
+       width = 5,
+       height = 4, limitsize=FALSE)#, useDingbats = FALSE)
+
+# Set colors for copy numbers
+cn_colors <- c( '#BBBBBB', '#999999', 
+                '#777777', 
+                '#555555', 
+                '#333333')
+
+copy_numbers = c("10^2", "10^3", "10^4", "10^5", "10^6")
+names(cn_colors) = copy_numbers
+cn_colScale_fill <- scale_fill_manual(name = "Copy Number",values = cn_colors)
+cn_colScale <- scale_colour_manual(name = "Copy Number",values = cn_colors)
+
+FigS6C = ggplot(TP_s, aes(x = as.numeric(Expected_freq), y = ALT_FREQ, color = Copy_number))+
+  labs(x="Expected Frequency", y= "Observed Frequency") +
+  geom_point(alpha = 0.8) + 
+  facet_grid(Copy_number~vcf_inputs)  + 
+  xlim(0, 0.25)+
+  ylim(0, 0.25)+
+  theme_bw() +
+  cn_colScale+
+  geom_abline(slope=1)+
+  theme(axis.title = element_text(size = 15))+
+  theme(legend.text = element_text(size = 13))+ 
+  theme(legend.key = element_blank(),
+                strip.background = element_rect(colour="black", fill="white"),
+                axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+print(FigS6C)
+ggsave(FigS6C,
+       filename = glue("{workdirectory}/Figures/FigS6C.png"),
+       width = 16,
+       height = 3, limitsize=FALSE)#, useDingbats = FALSE)
+ggsave(FigS6C,
+       filename = glue("{workdirectory}/figures_pdf/FigS6C.pdf"),
+       width = 16,
+       height = 6, limitsize=FALSE)#, useDingbats = FALSE)
+```
+
+
+
