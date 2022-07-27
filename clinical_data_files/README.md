@@ -23,4 +23,4 @@ Metadata for all samples and samples with high coverage, used in all downstream 
 - highcov.samples.csv
 
 Metadata and accession IDs for all samples. This is also Table S2 in the manuscript.  
-- TableS2.xlsx
+- Table_S2.xlsx
