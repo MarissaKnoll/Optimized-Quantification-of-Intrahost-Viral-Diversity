@@ -1,0 +1,19 @@
+All files required for clinical data analysis are in this folder.
+The files are:
+
+- Script used to load in and standardize VCF files. Paths will need to be updated by user
+vcf_load.ipynb
+
+- variant files from all callers. These were generated using the vcf_load script to load in vcf files from each sample from each tool.
+Individual variant files are available upon request. Variant files from each tool should be loaded in, combined and saved as 'compare.callers.vcfs.csv' before loading into analysis files
+freebayes.variants.csv
+hc.variants.csv
+ivar.variants.csv
+lofreq.variants.csv
+mutect2.variants.csv
+timo.variants.csv
+varscan.variants.csv
+
+- metadata for samples with high coverage, used in all downstream analyses
+highcov.samples.csv
+
