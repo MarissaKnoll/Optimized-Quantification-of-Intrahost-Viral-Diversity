@@ -18,7 +18,8 @@ Individual variant files are available upon request. Variant files from each too
 - timo.variants.csv
 - varscan.variants.csv
 
-Metadata for samples with high coverage, used in all downstream analyses.  
+Metadata for all samples and samples with high coverage, used in all downstream analyses.  
+- metadata.csv
 - highcov.samples.csv
 
 Metadata and accession IDs for all samples. This is also Table S2 in the manuscript.  
