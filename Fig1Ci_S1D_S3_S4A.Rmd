@@ -6,21 +6,11 @@ output: html_document
 ---
 
 # This notebook generates the following figures for the manuscript:
-- Figure 3A (influenza)
-- Figure 3B
-- Figure 4C
-- Figure 4D
-- Supp. Fig5A
-- Supp. Fig5C
-- Supp. Fig5D
-- Supp. Fig5E
-- Supp. Fig6B
-- Supp. Fig6C
-- Supp. Fig7A
-- Supp. Fig7B
-- Supp. Fig7C
-- Supp. Fig8C
-- Supp. Fig8D
+- Figure 1C (influenza)
+- Supp. Fig1D
+- Supp. FigS3
+- Supp. FigS4A
+Othere data generated in this notebook was not used in the final version of the manuscript
 
 # Required inputs to run notebook:
 ## R functions:
@@ -184,7 +174,7 @@ message("Remove 10^7 samples due to technical issues")
 vcf_plus = vcf_plus %>% filter(Copy_number != "10^7")
 ```
 
-## What is the relationship between observed and expected allele frequency estimates? Fig 3C & Fig S6A
+## What is the relationship between observed and expected allele frequency estimates? Fig 1C(influenza) & Fig S4A
 ```{r}
 # Use only TPs - so we can answer the question: of the TP snps that we did find, how close were they to the expected freq?
 TP = vcf_plus %>% filter (type == "TP", Rep == "rep1")
@@ -211,7 +201,7 @@ TP = merge(TP, TPmedian, by = c("TrueExpectedFrequency", "CHROM"))
 # Order the grid so it would be PB2, HA, NA
 TP$CHROM = factor(TP$CHROM, levels=c('PB2', 'HA', 'NA'))
 
-Fig3A = ggplot(TP %>% filter(!FerretID %in% c("Mix37", "Mix38", "Mix39", "Mix40", "Mix41", "Mix42", "Mix44")), aes(x = factor(round(medianfreq, digits = 3)), y = ALT_FREQ, color = vcf_inputs))+
+Fig1Ci = ggplot(TP %>% filter(!FerretID %in% c("Mix37", "Mix38", "Mix39", "Mix40", "Mix41", "Mix42", "Mix44")), aes(x = factor(round(medianfreq, digits = 3)), y = ALT_FREQ, color = vcf_inputs))+
   labs(x="Median observed Frequency", y= "Observed Frequency") +
   geom_point(width = 0.2, alpha = 0.3, position=position_dodge(width = 0.5)) + 
   tool_colScale+
@@ -223,12 +213,12 @@ Fig3A = ggplot(TP %>% filter(!FerretID %in% c("Mix37", "Mix38", "Mix39", "Mix40"
                 strip.background = element_rect(colour="black", fill="white"),
                 axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
   stat_summary(fun = "median", geom = "point", col = "black",size = 2,shape = 18,fill = "red")
-print(Fig3A)
-ggsave(Fig3A,
+print(Fig1Ci)
+ggsave(Fig1Ci,
        filename = glue("{workdirectory}/figures_new/Fig3A.png"),
        width = 15,
        height = 5, limitsize=FALSE)#, useDingbats = FALSE)
-ggsave(Fig3A,
+ggsave(Fig1Ci,
        filename = glue("{workdirectory}/figures_pdf_new/Fig3A.pdf"),
        width = 15,
        height = 5, limitsize=FALSE)#, useDingbats = FALSE)
@@ -244,7 +234,7 @@ names(cn_colors) = copy_numbers
 cn_colScale_fill <- scale_fill_manual(name = "Copy Number",values = cn_colors)
 cn_colScale <- scale_colour_manual(name = "Copy Number",values = cn_colors)
 
-FigS6A = ggplot(TP, aes(x = as.numeric(Expected_freq), y = ALT_FREQ, color = Copy_number))+
+FigS4A = ggplot(TP, aes(x = as.numeric(Expected_freq), y = ALT_FREQ, color = Copy_number))+
   labs(x="Expected Frequency", y= "Observed Frequency") +
   geom_point(alpha = 0.8) + 
   facet_grid(CHROM~vcf_inputs)  + 
@@ -256,18 +246,18 @@ FigS6A = ggplot(TP, aes(x = as.numeric(Expected_freq), y = ALT_FREQ, color = Cop
   theme(legend.key = element_blank(),
                 strip.background = element_rect(colour="black", fill="white"),
                 axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
-print(FigS6A)
-ggsave(FigS6A,
-       filename = glue("{workdirectory}/figures_new/FigS6A.png"),
+print(FigS4A)
+ggsave(FigS4A,
+       filename = glue("{workdirectory}/figures_new/FigS4A.png"),
        width = 16,
        height = 6.5, limitsize=FALSE)#, useDingbats = FALSE)
-ggsave(FigS6A,
-       filename = glue("{workdirectory}/figures_pdf_new/FigS6A.pdf"),
+ggsave(FigS4A,
+       filename = glue("{workdirectory}/figures_pdf_new/FigS4A.pdf"),
        width = 16,
        height = 6.5, limitsize=FALSE)#, useDingbats = FALSE)
 ```
 
-## Coverage plots - Fig S5C & S5D
+## Coverage plots - Fig S3
 ```{r}
 # make a coverage plot for all samples across genome position
 flu_covinfo = read.csv("cov_data.tsv", sep = "", header = T)
@@ -288,7 +278,7 @@ sample_colScale_fill <- scale_fill_manual(name = "Samples",values = sample_color
 sample_colScale <- scale_colour_manual(name = "Samples",values = sample_colors)
 
 flu_cov$segment = factor(flu_cov$segment, levels=c("PB2", "HA", "NA"))
-FigS5C = ggplot(data = flu_cov, aes(x=ntpos, y=log10(totalcount), color = Sample)) +
+FigS3 = ggplot(data = flu_cov, aes(x=ntpos, y=log10(totalcount), color = Sample)) +
         geom_line(aes(group=Sample), size = 1) +
         theme_bw() +
   sample_colScale+
@@ -300,13 +290,13 @@ FigS5C = ggplot(data = flu_cov, aes(x=ntpos, y=log10(totalcount), color = Sample
         facet_grid(Rep~segment, scales = "free_x") +
         xlab("Nucleotide Position") +
         ylab("Log10 Read Depth")
-print(FigS5C)
-ggsave(FigS5C,
-       filename = glue("{workdirectory}/FigS5C.png"),
+print(FigS3)
+ggsave(FigS3,
+       filename = glue("{workdirectory}/FigS3.png"),
        width = 12,
        height = 7, limitsize=FALSE)#, useDingbats = FALSE)
-ggsave(FigS5C,
-       filename = glue("{workdirectory}/figures_pdf/FigS5C.pdf"),
+ggsave(FigS3,
+       filename = glue("{workdirectory}/figures_pdf/FigS3.pdf"),
        width = 12,
        height = 7, limitsize=FALSE)#, useDingbats = FALSE)
 
@@ -328,6 +318,7 @@ names(rep12_colors) = rep12names
 rep12_colScale_fill <- scale_fill_manual(name = "Rep",values = rep12_colors)
 rep12_colScale <- scale_colour_manual(name = "Rep",values = rep12_colors)
 
+# not used
 FigS5D = ggplot(cov_avg, aes(x = Sample, y = log10(sample_avg_cov), color = Rep))+
   labs(x="Sample", y= "Log10(Average Coverage)") +
   geom_point(alpha = 0.8) + 
@@ -378,7 +369,7 @@ replicates = replicates %>% mutate(Category = ifelse(type.x == 'TP' & type.x == 
                                ifelse(type.x == 'FP' & type.y != 'FP' | type.x != 'FP' & type.y == 'FP', 'single_fp', "NA"))))))
 ```
 
-## How we find the transcription errors - Fig S5E
+## How we find the transcription errors
 ```{r}
 replicates$VAR = paste0(replicates$CHROM, '_', replicates$POS,'_', replicates$ALT)
 #replicates %>% filter(Category == "both_fp")
@@ -417,6 +408,7 @@ names(nt_colors) = nt
 nt_colScale_fill <- scale_fill_manual(name = "Nucleotide",values = nt_colors)
 nt_colScale <- scale_colour_manual(name = "Nucleotide",values = nt_colors)
 
+# not used
 FigS5E = ggplot(error_df, aes(x=VAR, y=vcf_inputs,fill = ALT)) +
     geom_tile(alpha = 0.8) +
     facet_grid(error_type~CHROM, scales = 'free')+
@@ -437,7 +429,7 @@ ggsave(FigS5E,
        height = 5, limitsize=FALSE)#, useDingbats = FALSE)
 ```
 
-## what's the relationship between allele freq estimates between replicates? - Figure S7A
+## what's the relationship between allele freq estimates between replicates?
 ```{r}
 
 ## Change the category of transcription errors we found into "transcription error"
@@ -499,6 +491,7 @@ Othertype$vcf_inputs_f = factor(Othertype$vcf_inputs, levels=c("varscan", "ivar"
 Othertype_v2 = Othertype %>% filter(ALT_FREQ.x <= 0.25, ALT_FREQ.y <=0.25)
 FPlayer_v2 = FPlayer %>% filter(ALT_FREQ.x <= 0.25, ALT_FREQ.y <=0.25)
 
+# not used
 FigS7A = ggplot() +  
     geom_point(data= Othertype_v2, aes(x = ALT_FREQ.x, y = ALT_FREQ.y, color = Category), width = 0.2, alpha = 0.4) +
     geom_point(data=FPlayer_v2, aes(x = ALT_FREQ.x, y = ALT_FREQ.y, color = Category), width = 0.2, alpha = 0.4) +
@@ -523,7 +516,7 @@ ggsave(FigS7A,
        height = 3, limitsize=FALSE)#, useDingbats = FALSE)
 ```
 
-## SNV map: showing both engineered SNVs and in-vitro transcription errors - FigureS5A
+## SNV map: showing both engineered SNVs and in-vitro transcription errors - FigureS1D
 ```{r}
 SNVTransErr = read.csv("Transcription_error_binom.csv", header = T, check.names = FALSE)
 SNVTransErr$CHROM = as.character(SNVTransErr$CHROM)
@@ -533,7 +526,7 @@ SNVinfo$CHROM[is.na(SNVinfo$CHROM)] <- "NA"
 SNVinfo$CHROM = factor(SNVinfo$CHROM, levels=c('PB2', 'HA', 'NA'))
 SNVTransErr$CHROM = factor(SNVTransErr$CHROM, levels=c('PB2', 'HA', 'NA'))
 
-FigS5A =  ggplot() + 
+FigS1D =  ggplot() + 
             geom_segment(data = SNVinfo, aes(x = POS, xend = POS, y=0, yend = 1),alpha = 0.8, color = "azure4") + 
             geom_segment(data = SNVTransErr, aes(x = POS, xend = POS, y=0, yend = 1, linetype= "Pre-MRTPCR error"),alpha = 0.8, color = "red") + 
             facet_grid(.~CHROM, scales = "free_x", space = 'free_x') +
@@ -549,13 +542,13 @@ FigS5A =  ggplot() +
                          axis.ticks.y = element_blank(),        
             axis.text.y = element_blank(), legend.position="bottom",
                   legend.title=element_blank())
-print(FigS5A)
-ggsave(FigS5A,
-       filename = glue("{workdirectory}/Figures/FigS5A.png"),
+print(FigS1D)
+ggsave(FigS1D,
+       filename = glue("{workdirectory}/Figures/FigS1D.png"),
        width = 17,
        height = 2, limitsize=FALSE)#, useDingbats = FALSE)
-ggsave(FigS5A,
-       filename = glue("{workdirectory}/figures_pdf/FigS5A.pdf"),
+ggsave(FigS1D,
+       filename = glue("{workdirectory}/figures_pdf/FigS1D.pdf"),
        width = 17,
        height = 2, limitsize=FALSE)#, useDingbats = FALSE)
 
@@ -628,7 +621,7 @@ vcf_plus = vcf_plus %>% mutate(type = ifelse( ALT_FREQ > 0 & TrueExpectedFrequen
 vcf_plus = vcf_plus %>% filter(Copy_number != "10^7") 
 ```
 
-## How well the variant callers agreed on the frequency of the variants predicted? - FigureS6B Note: Need to combine all these figures to make the whole S6B
+## How well the variant callers agreed on the frequency of the variants predicted? 
 ```{r}
 #plot the frequency of a variant in one caller against the frequency in each of the other callers
 Timofreq = vcf_plus %>% filter(vcf_inputs == "timo", Rep == "rep1")
@@ -1143,7 +1136,8 @@ ggsave(Figfbvarscan,
        height = 4, limitsize=FALSE)#, useDingbats = FALSE)
 ```
 
-## How does having cutoffs affect variant calling? - Fig S7B,S7C, Fig 4C & 4D
+## How does having cutoffs affect variant calling?
+## These versions were not used in paper.
 ```{r}
 #Construct cutoff df
 
@@ -1541,7 +1535,7 @@ ggsave(Fig4D,
 
 ```
 
-## FigS8C & S8D
+## not used in paper
 ```{r}
 df_filt = adjust_counts(count_filt)
 
@@ -1625,7 +1619,7 @@ ggsave(FigS8D,
        height = 4, limitsize=FALSE, useDingbats = FALSE)
 ```
 
-## Fig3B
+## Where are the FPs - not used in paper
 ```{r}
 FP = vcf_plus %>% filter(type == "FP", Copy_number != "control")
 FP%>% filter(ALT_FREQ>0.75)
