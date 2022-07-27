@@ -5,8 +5,8 @@ date: "4/11/2022"
 output: html_document
 ---
 # This notebook generates the following figures for the manuscript:
-- Figure 3A (SARS)
-- Supp. Fig 6C
+- Figure 1C (SARS)
+- Supp. Fig 4B
 
 # Required inputs to run notebook:
 ## R functions:
@@ -155,7 +155,7 @@ TPmedian_s = TP_s %>% group_by(TrueExpectedFrequency, CHROM) %>% summarise(media
 TP_s = merge(TP_s, TPmedian_s, by = c("TrueExpectedFrequency", "CHROM"))
 
 
-Fig3A_s = ggplot(TP_s, aes(x = factor(round(medianfreq, digits = 3)), y = ALT_FREQ, color = vcf_inputs))+
+Fig1C_s = ggplot(TP_s, aes(x = factor(round(medianfreq, digits = 3)), y = ALT_FREQ, color = vcf_inputs))+
   labs(x="Median observed Frequency", y= "Observed Frequency") +
   geom_point(width = 0.2, alpha = 0.3, position=position_dodge(width = 0.5)) + 
   tool_colScale+
@@ -167,8 +167,8 @@ Fig3A_s = ggplot(TP_s, aes(x = factor(round(medianfreq, digits = 3)), y = ALT_FR
                 strip.background = element_rect(colour="black", fill="white"),
                 axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
   stat_summary(fun = "median", geom = "point", col = "black",size = 2,shape = 18,fill = "red")
-print(Fig3A_s)
-ggsave(Fig3A_s,
+print(Fig1C_s)
+ggsave(Fig1C_s,
        filename = glue("{workdirectory}/figures_pdf_new/Fig3A_sars.pdf"),
        width = 5,
        height = 4, limitsize=FALSE)#, useDingbats = FALSE)
@@ -184,7 +184,7 @@ names(cn_colors) = copy_numbers
 cn_colScale_fill <- scale_fill_manual(name = "Copy Number",values = cn_colors)
 cn_colScale <- scale_colour_manual(name = "Copy Number",values = cn_colors)
 
-FigS6C = ggplot(TP_s, aes(x = as.numeric(Expected_freq), y = ALT_FREQ, color = Copy_number))+
+FigS4B = ggplot(TP_s, aes(x = as.numeric(Expected_freq), y = ALT_FREQ, color = Copy_number))+
   labs(x="Expected Frequency", y= "Observed Frequency") +
   geom_point(alpha = 0.8) + 
   facet_grid(Copy_number~vcf_inputs)  + 
@@ -198,12 +198,12 @@ FigS6C = ggplot(TP_s, aes(x = as.numeric(Expected_freq), y = ALT_FREQ, color = C
   theme(legend.key = element_blank(),
                 strip.background = element_rect(colour="black", fill="white"),
                 axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
-print(FigS6C)
-ggsave(FigS6C,
+print(FigS4B)
+ggsave(FigS4B,
        filename = glue("{workdirectory}/Figures/FigS6C.png"),
        width = 16,
        height = 3, limitsize=FALSE)#, useDingbats = FALSE)
-ggsave(FigS6C,
+ggsave(FigS4B,
        filename = glue("{workdirectory}/figures_pdf/FigS6C.pdf"),
        width = 16,
        height = 6, limitsize=FALSE)#, useDingbats = FALSE)
