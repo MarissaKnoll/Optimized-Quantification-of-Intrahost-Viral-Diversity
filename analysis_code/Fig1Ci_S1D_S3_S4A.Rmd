@@ -8,8 +8,7 @@ output: html_document
 # This notebook generates the following figures for the manuscript:
 - Figure 1C (influenza)
 - Supp. Fig1D
-- Supp. FigS3
-- Supp. FigS4A
+- Supp. FigS3A-B
 Othere data generated in this notebook was not used in the final version of the manuscript
 
 # Required inputs to run notebook:
@@ -174,7 +173,7 @@ message("Remove 10^7 samples due to technical issues")
 vcf_plus = vcf_plus %>% filter(Copy_number != "10^7")
 ```
 
-## What is the relationship between observed and expected allele frequency estimates? Fig 1C(influenza) & Fig S4A
+## What is the relationship between observed and expected allele frequency estimates? Fig 1C(influenza) & Fig S3B
 ```{r}
 # Use only TPs - so we can answer the question: of the TP snps that we did find, how close were they to the expected freq?
 TP = vcf_plus %>% filter (type == "TP", Rep == "rep1")
@@ -234,7 +233,7 @@ names(cn_colors) = copy_numbers
 cn_colScale_fill <- scale_fill_manual(name = "Copy Number",values = cn_colors)
 cn_colScale <- scale_colour_manual(name = "Copy Number",values = cn_colors)
 
-FigS4A = ggplot(TP, aes(x = as.numeric(Expected_freq), y = ALT_FREQ, color = Copy_number))+
+FigS3B = ggplot(TP, aes(x = as.numeric(Expected_freq), y = ALT_FREQ, color = Copy_number))+
   labs(x="Expected Frequency", y= "Observed Frequency") +
   geom_point(alpha = 0.8) + 
   facet_grid(CHROM~vcf_inputs)  + 
@@ -246,18 +245,18 @@ FigS4A = ggplot(TP, aes(x = as.numeric(Expected_freq), y = ALT_FREQ, color = Cop
   theme(legend.key = element_blank(),
                 strip.background = element_rect(colour="black", fill="white"),
                 axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
-print(FigS4A)
-ggsave(FigS4A,
+print(FigS3B)
+ggsave(FigS3B,
        filename = glue("{workdirectory}/figures_new/FigS4A.png"),
        width = 16,
        height = 6.5, limitsize=FALSE)#, useDingbats = FALSE)
-ggsave(FigS4A,
+ggsave(FigS3B,
        filename = glue("{workdirectory}/figures_pdf_new/FigS4A.pdf"),
        width = 16,
        height = 6.5, limitsize=FALSE)#, useDingbats = FALSE)
 ```
 
-## Coverage plots - Fig S3
+## Coverage plots - Fig S3A
 ```{r}
 # make a coverage plot for all samples across genome position
 flu_covinfo = read.csv("cov_data.tsv", sep = "", header = T)
@@ -278,7 +277,7 @@ sample_colScale_fill <- scale_fill_manual(name = "Samples",values = sample_color
 sample_colScale <- scale_colour_manual(name = "Samples",values = sample_colors)
 
 flu_cov$segment = factor(flu_cov$segment, levels=c("PB2", "HA", "NA"))
-FigS3 = ggplot(data = flu_cov, aes(x=ntpos, y=log10(totalcount), color = Sample)) +
+FigS3A = ggplot(data = flu_cov, aes(x=ntpos, y=log10(totalcount), color = Sample)) +
         geom_line(aes(group=Sample), size = 1) +
         theme_bw() +
   sample_colScale+
@@ -290,12 +289,12 @@ FigS3 = ggplot(data = flu_cov, aes(x=ntpos, y=log10(totalcount), color = Sample)
         facet_grid(Rep~segment, scales = "free_x") +
         xlab("Nucleotide Position") +
         ylab("Log10 Read Depth")
-print(FigS3)
-ggsave(FigS3,
+print(FigS3A)
+ggsave(FigS3A,
        filename = glue("{workdirectory}/FigS3.png"),
        width = 12,
        height = 7, limitsize=FALSE)#, useDingbats = FALSE)
-ggsave(FigS3,
+ggsave(FigS3A,
        filename = glue("{workdirectory}/figures_pdf/FigS3.pdf"),
        width = 12,
        height = 7, limitsize=FALSE)#, useDingbats = FALSE)
