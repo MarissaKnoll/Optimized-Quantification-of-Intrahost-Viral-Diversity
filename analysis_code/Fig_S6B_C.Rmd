@@ -6,8 +6,7 @@ date: '2022-07-15'
 
 This notebook generates the following figures:
 
-1. Fig. S6A
-2. Fig. S6B
+1. Fig. S6B-C
 
 This notebook requires the following inputs to run:
 
