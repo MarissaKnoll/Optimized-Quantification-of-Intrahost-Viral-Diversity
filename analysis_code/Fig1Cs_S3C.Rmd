@@ -6,7 +6,7 @@ output: html_document
 ---
 # This notebook generates the following figures for the manuscript:
 - Figure 1C (SARS)
-- Supp. Fig 4B
+- Supp. Fig 3C
 
 # Required inputs to run notebook:
 ## R functions:
@@ -128,7 +128,7 @@ vcf_plus_s = vcf_plus_s %>% mutate(type = ifelse( ALT_FREQ > 0 & TrueExpectedFre
                                    ifelse(ALT_FREQ > 0 & TrueExpectedFrequency > 0, "TP", "NA"))))
 #vcf_plus_s %>% filter(POS == "14408")
 ```
-## What is the relationship between observed and expected allele frequency estimates? - Fig 3A, Fig S6C
+## What is the relationship between observed and expected allele frequency estimates? - Fig 3A, Fig S3C
 ```{r}
 # Use only TPs - so we can answer the question: of the TP snps that we did find, how close were they to the expected freq?
 #True positives 
@@ -184,7 +184,7 @@ names(cn_colors) = copy_numbers
 cn_colScale_fill <- scale_fill_manual(name = "Copy Number",values = cn_colors)
 cn_colScale <- scale_colour_manual(name = "Copy Number",values = cn_colors)
 
-FigS4B = ggplot(TP_s, aes(x = as.numeric(Expected_freq), y = ALT_FREQ, color = Copy_number))+
+FigS3C = ggplot(TP_s, aes(x = as.numeric(Expected_freq), y = ALT_FREQ, color = Copy_number))+
   labs(x="Expected Frequency", y= "Observed Frequency") +
   geom_point(alpha = 0.8) + 
   facet_grid(Copy_number~vcf_inputs)  + 
@@ -198,13 +198,13 @@ FigS4B = ggplot(TP_s, aes(x = as.numeric(Expected_freq), y = ALT_FREQ, color = C
   theme(legend.key = element_blank(),
                 strip.background = element_rect(colour="black", fill="white"),
                 axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
-print(FigS4B)
-ggsave(FigS4B,
-       filename = glue("{workdirectory}/Figures/FigS6C.png"),
+print(FigS3C)
+ggsave(FigS3C,
+       filename = glue("{workdirectory}/Figures/FigS3C.png"),
        width = 16,
        height = 3, limitsize=FALSE)#, useDingbats = FALSE)
-ggsave(FigS4B,
-       filename = glue("{workdirectory}/figures_pdf/FigS6C.pdf"),
+ggsave(FigS3C,
+       filename = glue("{workdirectory}/figures_pdf/FigS3C.pdf"),
        width = 16,
        height = 6, limitsize=FALSE)#, useDingbats = FALSE)
 ```
