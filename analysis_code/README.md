@@ -1,10 +1,10 @@
 ## Analysis code for all figure generation
 
-#### All code used for analysis and figure generation is available here. 
-#### All dependencies are contained within the other folders in this repository.
+All code used for analysis and figure generation is available here. 
 
+All dependencies are contained within the other folders in this repository.
 
-#### Notebooks (ipynb or rmd) and their corresponding figures are as follows: 
+Notebooks (ipynb or rmd) and their corresponding figures are as follows: 
 
 #### SNV.Fig.1A.2B.S1B.S2.S3AB.S4AB.ipynb:
 - Figures: 1A, 2B
