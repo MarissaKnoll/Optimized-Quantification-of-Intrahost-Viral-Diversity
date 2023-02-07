@@ -6,7 +6,7 @@
 
 #### Notebooks (ipynb or rmd) and their corresponding figures are as follows: 
 
-##### SNV.Fig.1A.2B.S1B.S2.S3AB.S4AB.ipynb:
+#### SNV.Fig.1A.2B.S1B.S2.S3AB.S4AB.ipynb:
 - Figures: 1A, 2B
 - Supp. Figures: 1B, 2, 3A, 3B, 4A, and 4B
 
@@ -30,8 +30,16 @@
 #### FigS1E: 
 - Supp. Figs: 1E
 
+#### FigS7A.ipynb:
+- Supp. Figs: 6A
+
+#### FigS7C.ipynb:
+- Supp. Figs: 6C
 
 
+#### Outdated notebooks: 
+- Fig1Ci_S1D_S3A_B.Rmd
+- Fig1Cs_S3C.Rmd
+- FigS6B_C.Rmd
 
-#### Older notebooks: 
 
