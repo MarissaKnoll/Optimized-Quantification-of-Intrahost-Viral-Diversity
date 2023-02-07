@@ -24,3 +24,11 @@ Metadata for all samples and samples with high coverage, used in all downstream 
 
 Metadata and accession IDs for all samples. This is also Table S2 in the manuscript.  
 - Table_S2.xlsx
+
+### Tonkin-Hill analysis:
+Files are input into "SNV.Fig.7ABC" ipynb to generate Supp. Figs 7A-7C
+- COV19.genome.coverage.pass.check.200.csv (% covered at 200x)
+- PRJEB37886_metadata.txt (rep 1 sample names)
+- PRJEB42623_metadata.txt (rep 2 sample names)
+- SARS.ivar.200.0.01.minor.csv (iVar minor SNVs)
+- COV19.minor.csv (timo minor SNVs)
