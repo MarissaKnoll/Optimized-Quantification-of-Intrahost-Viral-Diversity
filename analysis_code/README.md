@@ -40,6 +40,5 @@ Notebooks (ipynb or rmd) and their corresponding figures are as follows:
 #### Outdated notebooks: 
 - Fig1Ci_S1D_S3A_B.Rmd
 - Fig1Cs_S3C.Rmd
-- FigS6B_C.Rmd
 
 
